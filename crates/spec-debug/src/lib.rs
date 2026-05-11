@@ -37,6 +37,10 @@ impl AsmSpec for DebugAsmSpec {
     fn construct_genesis_state(&self, params: &Self::Params) -> AnchorState {
         construct_debug_genesis_state(params)
     }
+
+    fn genesis_l1_height(&self, params: &Self::Params) -> u64 {
+        self.inner.genesis_l1_height(params)
+    }
 }
 
 impl DebugAsmSpec {

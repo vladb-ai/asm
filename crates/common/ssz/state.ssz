@@ -6,12 +6,15 @@ import pow
 import strata_merkle
 
 ### Verifiable accumulator for ASM history.
+###
+### Indices into this MMR are L1 block heights. At genesis the MMR is
+### prefilled with sentinel leaves (`MMR_PREFILL_LEAF`) for heights
+### `0..=genesis_l1_height`, so the first appended manifest (for
+### `genesis_l1_height + 1`) lands at MMR index `genesis_l1_height + 1`,
+### keeping leaf index aligned with L1 block height.
 class AsmHistoryAccumulatorState(Container):
     #~# external_kind: container
     manifest_mmr: strata_merkle.Mmr64B32
-    ### Height offset that maps the first manifest leaf to its L1 block height.
-    ### This starts at `genesis_height + 1` because manifests begin after the genesis block.
-    offset: uint64
 
 ### Serialized state for a subprotocol section.
 class SectionState(Container):

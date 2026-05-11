@@ -26,4 +26,8 @@ impl AsmSpec for StrataAsmSpec {
     fn construct_genesis_state(&self, params: &Self::Params) -> AnchorState {
         crate::construct_genesis_state(params)
     }
+
+    fn genesis_l1_height(&self, params: &Self::Params) -> u64 {
+        params.anchor.block.height() as u64
+    }
 }

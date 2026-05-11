@@ -102,7 +102,9 @@ impl VerifiedAuxData {
     /// Verifies and indexes manifest hashes using MMR proofs.
     ///
     /// Verifies each manifest hash's MMR proof against the provided compact MMR
-    /// and indexes verified hashes by their block height (MMR index + genesis height).
+    /// and indexes verified hashes by their L1 block height. The manifest MMR
+    /// is height-indexed (sentinel-prefilled at and before genesis), so the
+    /// proof's leaf index *is* the L1 block height.
     ///
     /// # Errors
     ///
@@ -120,8 +122,8 @@ impl VerifiedAuxData {
                     hash: *item.hash(),
                 });
             }
-            // Convert MMR index to block height using offset
-            let height = manifest_mmr.offset() + item.proof().index();
+            // MMR leaf index == L1 block height (height-indexed MMR).
+            let height = item.proof().index();
             manifest_hashes.insert(height, *item.hash());
         }
 

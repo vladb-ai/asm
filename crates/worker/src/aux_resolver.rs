@@ -6,7 +6,7 @@
 //! ### Manifest Hash Resolution
 //!
 //! Fully implemented with on-demand MMR proof generation:
-//! - Maps L1 block heights to MMR indices using genesis offset
+//! - Uses L1 block heights directly as MMR leaf indices (height-indexed MMR)
 //! - Fetches manifest hashes from fast lookup storage
 //! - Generates MMR proofs using `AsmDBSled`
 //! - Converts `MerkleProofB32` (SSZ type) to [`AsmMerkleProof`] (ASM type)
@@ -41,9 +41,6 @@ use crate::{WorkerContext, WorkerError, WorkerResult};
 pub struct AuxDataResolver<'a> {
     /// Worker context for accessing ASM state and MMR database
     context: &'a dyn WorkerContext,
-    /// L1 genesis block height. Stored as `u64` instead of `L1Height` to match MMR index
-    /// arithmetic.
-    genesis_height: u64,
     /// Leaf count at which manifest proofs should be generated.
     at_leaf_count: u64,
 }
@@ -54,12 +51,10 @@ impl<'a> AuxDataResolver<'a> {
     /// # Arguments
     ///
     /// * `context` - Worker context for ASM state access and MMR database
-    /// * `genesis_height` - L1 genesis block height
     /// * `at_leaf_count` - MMR leaf count snapshot for proof generation
-    pub fn new(context: &'a dyn WorkerContext, genesis_height: u64, at_leaf_count: u64) -> Self {
+    pub fn new(context: &'a dyn WorkerContext, at_leaf_count: u64) -> Self {
         Self {
             context,
-            genesis_height,
             at_leaf_count,
         }
     }
@@ -147,7 +142,9 @@ impl<'a> AuxDataResolver<'a> {
     /// Resolves historical manifest hashes with MMR proofs.
     ///
     /// For each height range, fetches the stored manifest hashes and generates
-    /// MMR proofs using the AsmDBSled implementation.
+    /// MMR proofs using the AsmDBSled implementation. The MMR is height-indexed
+    /// (sentinel-prefilled at and before genesis), so L1 block heights are used
+    /// directly as MMR leaf indices — no offset translation is needed.
     ///
     /// # Arguments
     ///
@@ -160,10 +157,8 @@ impl<'a> AuxDataResolver<'a> {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Genesis height calculation fails
     /// - Any manifest hash cannot be fetched from storage
     /// - MMR proof generation fails
-    /// - Requested height is before genesis
     fn resolve_manifest_hashes(
         &self,
         ranges: &[ManifestHashRange],
@@ -174,41 +169,16 @@ impl<'a> AuxDataResolver<'a> {
 
         debug!(count = ranges.len(), "Resolving manifest hash ranges");
 
-        let genesis_height = self.genesis_height;
-
         let mut resolved = Vec::new();
 
         for range in ranges {
             let start_height = range.start_height();
             let end_height = range.end_height();
 
-            // Validate range is not before genesis
-            if end_height < genesis_height {
-                warn!(
-                    start = start_height,
-                    end = end_height,
-                    genesis = genesis_height,
-                    "Requested manifest hash range before genesis"
-                );
-                return Err(WorkerError::InvalidHeightRange {
-                    start: start_height,
-                    end: end_height,
-                });
-            }
+            debug!(start_height, end_height, "Resolving manifest hash range");
 
-            // Calculate MMR indices from L1 heights
-            // MMR index 0 = genesis height + 1, index 1 = genesis + 2, etc.
-            // offset = genesis_height + 1 (height of first block with manifest)
-            let offset = genesis_height + 1;
-            let start_index = start_height.saturating_sub(offset);
-            let end_index = end_height.saturating_sub(offset);
-
-            debug!(
-                start_height,
-                end_height, start_index, end_index, "Resolving manifest hash range"
-            );
-
-            for mmr_index in start_index..=end_index {
+            // L1 block height == MMR leaf index (height-indexed MMR).
+            for mmr_index in start_height..=end_height {
                 // Fetch manifest hash from storage
                 let manifest_hash: [u8; 32] = self
                     .context
@@ -230,11 +200,7 @@ impl<'a> AuxDataResolver<'a> {
                 let hash = AsmManifestHash::from(manifest_hash);
                 resolved.push(VerifiableManifestHash::new(hash, asm_proof));
 
-                trace!(
-                    index = mmr_index,
-                    height = offset + mmr_index,
-                    "Resolved manifest hash with proof"
-                );
+                trace!(index = mmr_index, "Resolved manifest hash with proof");
             }
         }
 
@@ -250,7 +216,7 @@ impl<'a> AuxDataResolver<'a> {
 impl<'a> fmt::Debug for AuxDataResolver<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AuxDataResolver")
-            .field("genesis_height", &self.genesis_height)
+            .field("at_leaf_count", &self.at_leaf_count)
             .finish_non_exhaustive()
     }
 }

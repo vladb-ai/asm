@@ -43,6 +43,20 @@ impl MmrDb {
         }
     }
 
+    /// Prefills the MMR with `sentinel` leaves until it has at least
+    /// `target_count` entries.
+    ///
+    /// Idempotent: a no-op when the MMR already has at least `target_count`
+    /// entries. Used at startup to align DB-side leaf indices with L1 block
+    /// heights, mirroring the in-memory proven MMR's genesis prefill.
+    pub fn prefill_to(&self, target_count: u64, sentinel: Buf32) -> Result<()> {
+        let current = self.leaf_count()?;
+        for _ in current..target_count {
+            self.append_leaf(sentinel)?;
+        }
+        Ok(())
+    }
+
     /// Appends a manifest hash as a new leaf. Returns the leaf index.
     pub fn append_leaf(&self, hash: Buf32) -> Result<u64> {
         let index = self.leaf_count()?;

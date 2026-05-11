@@ -51,6 +51,8 @@ pub(crate) struct AsmWorkerContext {
     mmr_db: Arc<MmrDb>,
     export_entries_db: Option<ExportEntriesDb>,
     moho_storage: Option<MohoStorage>,
+    /// L1 height of the chain genesis (anchor) block.
+    genesis_height: u64,
 }
 
 impl AsmWorkerContext {
@@ -61,6 +63,7 @@ impl AsmWorkerContext {
         mmr_db: Arc<MmrDb>,
         export_entries_db: Option<ExportEntriesDb>,
         moho_storage: Option<MohoStorage>,
+        genesis_height: u64,
     ) -> Self {
         Self {
             runtime_handle,
@@ -69,16 +72,16 @@ impl AsmWorkerContext {
             mmr_db,
             export_entries_db,
             moho_storage,
+            genesis_height,
         }
     }
 
     /// Materialize and persist the derived [`MohoState`] for this anchor state.
     /// No-op when [`MohoStorage`] is not configured.
     ///
-    /// Genesis is identified by the block commitment's height — it matches the
-    /// `genesis_height` carried in the anchor state's history accumulator.
-    /// For non-genesis blocks we read the parent's `MohoState` and chain
-    /// forward.
+    /// Genesis is identified by the block commitment's height matching the
+    /// configured `genesis_height`. For non-genesis blocks we read the parent's
+    /// `MohoState` and chain forward.
     fn compute_and_store_moho_state(
         &self,
         blockid: &L1BlockCommitment,
@@ -88,11 +91,7 @@ impl AsmWorkerContext {
             return Ok(());
         };
 
-        let genesis_height = asm_state
-            .state()
-            .chain_view
-            .history_accumulator
-            .genesis_height();
+        let genesis_height = self.genesis_height;
 
         let moho_state = if blockid.height() as u64 == genesis_height {
             construct_genesis_moho_state(moho.asm_predicate.clone(), asm_state.state())

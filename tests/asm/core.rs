@@ -48,7 +48,7 @@ async fn test_block_fetching_and_caching() {
     }
 
     // Verify blocks are cached
-    assert_eq!(context.block_cache.lock().unwrap().len(), 5);
+    assert_eq!(context.inner.lock().unwrap().block_cache.len(), 5);
 
     // Fetch again - should come from cache
     let block_id = block_hashes[0].to_l1_block_id();
@@ -130,8 +130,9 @@ async fn test_multiple_block_processing() {
 //   - Compact representation: stores only peaks, not all leaves. Keeps the proven state small.
 //   - Can *verify* inclusion proofs but cannot *generate* them.
 //   - Updated by the STF during `compute_asm_transition`.
-//   - Starts empty at genesis with `offset = genesis_height + 1`, so its index 0 is the first
-//     post-genesis block.
+//   - Height-indexed: at genesis it is prefilled with `MMR_PREFILL_LEAF` sentinels for every L1
+//     height `0..=genesis_height`, so the manifest for L1 height `h` lands at MMR leaf index `h`.
+//     The first appended real manifest is for `genesis_height + 1`.
 //
 // **External (full) MMR** — the worker-side database managed by `WorkerContext`.
 //   - Lives outside the proven state, in the worker's persistent storage.
@@ -147,10 +148,11 @@ async fn test_multiple_block_processing() {
 //   4. Inside the STF, the checkpoint subprotocol verifies those proofs against the internal
 //      compact MMR.
 //
-// The two MMRs must have identical leaves at identical indices. If the
-// external MMR included the genesis manifest (which the internal does not),
-// all external indices would be shifted by 1, and every proof generated
-// from the external MMR would fail verification against the internal one.
+// The two MMRs must have identical leaves at identical indices. Both are
+// height-indexed (sentinel-prefilled at and before genesis); if either side
+// appended the genesis manifest, all subsequent indices would shift by 1 and
+// every proof generated from the external MMR would fail verification against
+// the internal one.
 
 /// Verifies the external (full) MMR stays index-aligned with the internal
 /// (proven compact) MMR after block processing.
@@ -166,13 +168,15 @@ async fn test_proven_and_external_mmr_index_alignment() {
 
     let genesis_height = harness.genesis_height;
 
-    // After genesis processing, the external MMR must be empty — genesis
-    // manifest is stored for L1 data consumers but NOT appended to the MMR.
-    // The internal (proven) compact MMR also starts empty at this point.
+    // After genesis processing, both MMRs are height-indexed and prefilled
+    // with `MMR_PREFILL_LEAF` sentinels for every L1 height `0..=genesis_height`.
+    // The genesis manifest itself is stored for L1 data consumers but NOT
+    // appended (its slot is already the prefill sentinel).
+    let prefill_count = genesis_height + 1;
     assert_eq!(
-        harness.get_mmr_leaf_count(),
-        0,
-        "external MMR should be empty after genesis (genesis manifest must not be a leaf)"
+        harness.get_mmr_leaf_count() as u64,
+        prefill_count,
+        "external MMR should be sentinel-prefilled to `genesis_height + 1` entries"
     );
 
     // Mine blocks in multiple rounds of increasing size to exercise the MMR
@@ -197,15 +201,9 @@ async fn test_proven_and_external_mmr_index_alignment() {
             .unwrap_or_else(|| panic!("round {round}: ASM state should exist"));
 
         let proven_accumulator = &latest_state.state().chain_view.history_accumulator;
-        let proven_offset = proven_accumulator.offset();
         let proven_tip_height = proven_accumulator.last_inserted_height();
-        let proven_leaf_count = proven_tip_height - proven_offset + 1;
+        let proven_entries = proven_accumulator.num_entries();
 
-        assert_eq!(
-            proven_offset,
-            genesis_height + 1,
-            "round {round}: proven MMR offset should be genesis_height + 1"
-        );
         assert_eq!(
             proven_tip_height,
             genesis_height + total_blocks_mined as u64,
@@ -216,31 +214,41 @@ async fn test_proven_and_external_mmr_index_alignment() {
         let external_leaf_count = harness.get_mmr_leaf_count();
 
         // Core invariant: both MMRs must have the same number of leaves.
-        // If genesis were erroneously in the external MMR, this would be
-        // total_blocks_mined + 1 (off-by-one), breaking proof alignment.
+        // Both are height-indexed with `genesis_height + 1` prefill sentinels
+        // plus one real leaf per mined block.
         assert_eq!(
-            proven_leaf_count as usize, external_leaf_count,
+            proven_entries as usize,
+            external_leaf_count,
             "round {round}: proven and external MMR leaf counts must match \
-             (both should be {total_blocks_mined})"
+             (both should be {} = genesis_height + 1 + {total_blocks_mined})",
+            genesis_height + 1 + total_blocks_mined as u64
         );
     }
 
-    // -- Leaf hash integrity over all leaves --
-    // Verify every external MMR leaf matches its corresponding manifest hash.
-    // This ensures the external MMR stores the exact same data the proven MMR
-    // committed to, across all 32 leaves.
+    // -- Leaf hash integrity over real (post-genesis) leaves --
+    // Verify every post-genesis external MMR leaf matches its corresponding
+    // manifest hash. Indices `0..=genesis_height` are prefill sentinels and
+    // are skipped here.
     let external_leaves = harness.get_mmr_leaves();
     let stored_manifests = harness.get_stored_manifests();
-    let proven_offset = genesis_height + 1;
+    let prefill_count = (genesis_height + 1) as usize;
 
     assert_eq!(
         external_leaves.len(),
-        total_blocks_mined,
-        "final external MMR should have exactly {total_blocks_mined} leaves"
+        prefill_count + total_blocks_mined,
+        "final external MMR should have {prefill_count} prefill + {total_blocks_mined} real leaves"
     );
 
-    for (mmr_index, external_leaf_hash) in external_leaves.iter().enumerate() {
-        let block_height = proven_offset + mmr_index as u64;
+    let sentinel = strata_asm_common::MMR_PREFILL_LEAF;
+    for (mmr_index, leaf) in external_leaves.iter().take(prefill_count).enumerate() {
+        assert_eq!(
+            *leaf, sentinel,
+            "pre-genesis leaf at index {mmr_index} must be the prefill sentinel"
+        );
+    }
+
+    for (mmr_index, external_leaf_hash) in external_leaves.iter().enumerate().skip(prefill_count) {
+        let block_height = mmr_index as u64;
         let manifest = stored_manifests
             .iter()
             .find(|m| m.height() as u64 == block_height)
@@ -254,16 +262,20 @@ async fn test_proven_and_external_mmr_index_alignment() {
         );
     }
 
-    // Verify no external leaf maps to the genesis height — genesis must
-    // never appear as an MMR leaf.
-    assert!(
-        !stored_manifests
-            .iter()
-            .filter(|m| m.height() as u64 == genesis_height)
-            .any(|genesis_mf| {
-                let genesis_hash: [u8; 32] = *genesis_mf.compute_hash().as_ref();
-                external_leaves.contains(&genesis_hash)
-            }),
-        "genesis manifest hash must not appear in the external MMR leaves"
-    );
+    // Verify the genesis manifest is not appended as a real leaf — its slot
+    // is occupied by the prefill sentinel.
+    if let Some(genesis_mf) = stored_manifests
+        .iter()
+        .find(|m| m.height() as u64 == genesis_height)
+    {
+        let genesis_hash: [u8; 32] = *genesis_mf.compute_hash().as_ref();
+        assert_eq!(
+            external_leaves[genesis_height as usize], sentinel,
+            "genesis slot must hold the prefill sentinel, not the genesis manifest hash"
+        );
+        assert_ne!(
+            external_leaves[genesis_height as usize], genesis_hash,
+            "genesis manifest hash must not appear at the genesis MMR slot"
+        );
+    }
 }

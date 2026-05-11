@@ -52,6 +52,17 @@ pub(crate) async fn bootstrap(
         asm_predicate: backend.asm_predicate.clone(),
     });
     let export_entries_for_worker = orch_prep.as_ref().map(|_| export_entries_db.clone());
+    let genesis_height = params.anchor.block.height() as u64;
+
+    // Align the DB-side ASM manifest MMR with the in-memory (proven) MMR:
+    // both are height-indexed and prefilled with sentinel leaves up to and
+    // including `genesis_height`, so that the manifest for height `h` lands
+    // at leaf index `h`. Idempotent — no-op on restart.
+    mmr_db.prefill_to(
+        genesis_height + 1,
+        strata_identifiers::Buf32::new(strata_asm_common::MMR_PREFILL_LEAF),
+    )?;
+
     let worker_context = AsmWorkerContext::new(
         runtime_handle.clone(),
         bitcoin_client.clone(),
@@ -59,6 +70,7 @@ pub(crate) async fn bootstrap(
         mmr_db.clone(),
         export_entries_for_worker,
         moho_storage,
+        genesis_height,
     );
 
     // 5. Launch ASM worker

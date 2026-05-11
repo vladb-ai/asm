@@ -18,6 +18,12 @@ pub trait AsmSpec {
 
     /// Builds the genesis [`AnchorState`] from the given parameters.
     fn construct_genesis_state(&self, params: &Self::Params) -> AnchorState;
+
+    /// Returns the L1 block height of the chain genesis (anchor) block.
+    ///
+    /// Used by the worker to align the height-indexed manifest MMR with L1
+    /// block heights (positions `0..=genesis_l1_height` are sentinel-prefilled).
+    fn genesis_l1_height(&self, params: &Self::Params) -> u64;
 }
 
 /// Impl of a subprotocol execution stage.

@@ -51,7 +51,12 @@ impl<'c> PreProcessStage<'c> {
         tx_bufs: &'c BTreeMap<SubprotocolId, Vec<TxInputRef<'c>>>,
     ) -> Self {
         let accumulator = &anchor_state.chain_view.history_accumulator;
-        let min_manifest_height = accumulator.offset();
+        // The MMR is height-indexed (sentinel-prefilled at and before genesis),
+        // so any MMR index `0..=last_inserted_height` is a verifiable position.
+        // Pre-genesis positions are sentinels — structurally valid but
+        // semantically meaningless; we admit them rather than special-casing
+        // the bound here.
+        let min_manifest_height = 0;
         let max_manifest_height = accumulator.last_inserted_height();
         let aux_collector = AuxRequestCollector::new(min_manifest_height, max_manifest_height);
         Self {

@@ -193,15 +193,20 @@ impl BridgeExt for AsmTestHarness {
     ) -> anyhow::Result<BlockHash> {
         let genesis_l1_height = self.genesis_height as u32;
 
-        // 1. Get manifest hashes from the live ASM MMR
-        let mmr_leaves: Vec<AsmManifestHash> = self
-            .get_mmr_leaves()
-            .into_iter()
+        // 1. Get manifest hashes from the live ASM MMR. The MMR is height-indexed: indices
+        //    `0..=genesis_l1_height` are sentinel prefill; real manifests start at index
+        //    `genesis_l1_height + 1`.
+        let mmr_leaves = self.get_mmr_leaves();
+        let prefill_count = genesis_l1_height as usize + 1;
+        let real_leaves: Vec<AsmManifestHash> = mmr_leaves
+            .iter()
+            .skip(prefill_count)
+            .copied()
             .map(AsmManifestHash::from)
             .collect();
 
         // 2. Build the new checkpoint tip covering all processed L1 blocks
-        let new_l1_height = genesis_l1_height + mmr_leaves.len() as u32;
+        let new_l1_height = genesis_l1_height + real_leaves.len() as u32;
         let new_epoch = checkpoint_harness.verified_tip().epoch + 1;
         let new_ol_slot = checkpoint_harness.verified_tip().l2_commitment().slot() + 1;
         let new_ol_blkid: OLBlockId = ArbitraryGenerator::new().generate();
@@ -213,7 +218,7 @@ impl BridgeExt for AsmTestHarness {
 
         // 4. Build checkpoint payload with custom OL logs and live manifest hashes
         let payload =
-            checkpoint_harness.build_payload_with_tip_and_logs(new_tip, ol_logs, &mmr_leaves);
+            checkpoint_harness.build_payload_with_tip_and_logs(new_tip, ol_logs, &real_leaves);
 
         // 5. Encode payload with CodecSsz and submit as envelope tx with sequencer keypair (SPS-51)
         let codec_payload = CodecSsz::new(payload);
