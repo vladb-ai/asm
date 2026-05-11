@@ -2,9 +2,7 @@ use std::num::NonZero;
 
 use ssz_derive::{Decode, Encode};
 use strata_asm_params::Role;
-use strata_asm_proto_admin_txs::{
-    parser::SignedPayload, signing_message::compute_signing_message_hash,
-};
+use strata_asm_proto_admin_txs::{parser::SignedPayload, signing_message::SigningMessage};
 use strata_crypto::threshold_signature::{ThresholdConfig, verify_threshold_signatures};
 
 use crate::error::AdministrationError;
@@ -82,7 +80,8 @@ impl MultisigAuthority {
                 max_gap: max_seqno_gap,
             });
         }
-        let message_hash = compute_signing_message_hash(&payload.action, payload.seqno, self.role);
+        let message_hash =
+            SigningMessage::for_action(&payload.action, payload.seqno).compute_sighash();
 
         verify_threshold_signatures(
             &self.config,
@@ -115,7 +114,7 @@ mod tests {
     use rand::rngs::OsRng;
     use strata_asm_params::Role;
     use strata_asm_proto_admin_txs::{
-        actions::{MultisigAction, UpdateAction, updates::seq::SequencerUpdate},
+        actions::{MultisigAction, UpdateAction, updates::SequencerUpdate},
         parser::SignedPayload,
         test_utils::create_signature_set,
     };
@@ -147,41 +146,12 @@ mod tests {
         let (authority, secret_key) = create_test_authority(Role::StrataSequencerManager);
         let action = sample_action();
         let seqno = 1;
-        let signatures = create_signature_set(
-            &[secret_key],
-            &[0],
-            &action,
-            Role::StrataSequencerManager,
-            seqno,
-        );
+        let signatures = create_signature_set(&[secret_key], &[0], &action, seqno);
         let payload = SignedPayload::new(seqno, action, signatures);
 
         let result =
             authority.verify_action_signature(&payload, NonZero::new(10).expect("non-zero"));
 
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn verify_action_signature_rejects_payload_signed_for_wrong_role() {
-        let (authority, secret_key) = create_test_authority(Role::StrataAdministrator);
-        let action = sample_action();
-        let seqno = 1;
-        let signatures = create_signature_set(
-            &[secret_key],
-            &[0],
-            &action,
-            Role::StrataSequencerManager,
-            seqno,
-        );
-        let payload = SignedPayload::new(seqno, action, signatures);
-
-        let result =
-            authority.verify_action_signature(&payload, NonZero::new(10).expect("non-zero"));
-
-        assert!(matches!(
-            result,
-            Err(AdministrationError::ThresholdSignature(_))
-        ));
     }
 }

@@ -12,12 +12,11 @@
 )]
 
 use harness::{
-    admin::{create_test_admin_setup, predicate_update, sequencer_update, AdminExt},
+    admin::{create_test_admin_setup, ol_stf_vk_update, sequencer_update, AdminExt},
     checkpoint::CheckpointExt,
     test_harness::AsmTestHarnessBuilder,
 };
 use integration_tests::harness;
-use strata_asm_proto_admin_txs::actions::updates::predicate::ProofType;
 use strata_predicate::{PredicateKey, PredicateTypeId};
 
 // ============================================================================
@@ -145,10 +144,7 @@ async fn test_predicate_update_propagates_to_checkpoint() {
     // Submit a predicate update (gets queued for StrataAdministrator role)
     let new_predicate = PredicateKey::always_accept();
     harness
-        .submit_admin_action(
-            &mut ctx,
-            predicate_update(new_predicate.clone(), ProofType::OLStf),
-        )
+        .submit_admin_action(&mut ctx, ol_stf_vk_update(new_predicate.clone()))
         .await
         .unwrap();
 
@@ -225,10 +221,7 @@ async fn test_zero_and_nonzero_depth_updates_both_apply() {
     // Submit predicate update (gets queued with activation_height = current + confirmation_depth)
     let new_predicate = PredicateKey::always_accept();
     harness
-        .submit_admin_action(
-            &mut ctx,
-            predicate_update(new_predicate.clone(), ProofType::OLStf),
-        )
+        .submit_admin_action(&mut ctx, ol_stf_vk_update(new_predicate.clone()))
         .await
         .unwrap();
 

@@ -9,7 +9,7 @@
 )]
 
 use harness::{
-    admin::{create_test_admin_setup, predicate_update, AdminExt},
+    admin::{asm_stf_vk_update, create_test_admin_setup, AdminExt},
     test_harness::AsmTestHarnessBuilder,
 };
 use integration_tests::harness;
@@ -20,7 +20,6 @@ use strata_asm_logs::AsmStfUpdate;
 use strata_asm_proof_impl::{
     moho_program::input::AsmStepInput, program::AsmStfProofProgram, test_utils::create_moho_state,
 };
-use strata_asm_proto_admin_txs::actions::updates::predicate::ProofType;
 use strata_asm_spec::StrataAsmSpec;
 use strata_asm_stf::compute_asm_transition;
 use strata_btc_verification::TxidInclusionProof;
@@ -29,7 +28,7 @@ use strata_predicate::PredicateKey;
 /// Verifies ASM predicate updates emit an `AsmStfUpdate` log in the manifest after activation.
 ///
 /// Flow:
-/// 1. Submit predicate update with `ProofType::Asm` (gets queued)
+/// 1. Submit ASM STF verifying-key update (gets queued)
 /// 2. Mine blocks to trigger activation (confirmation_depth=2)
 /// 3. Verify the manifest contains an `AsmStfUpdate` log with the correct predicate
 #[tokio::test(flavor = "multi_thread")]
@@ -47,10 +46,7 @@ async fn test_asm_predicate_update_emits_log() {
     // Submit an ASM predicate update (gets queued for StrataAdministrator role)
     let new_predicate = PredicateKey::always_accept();
     harness
-        .submit_admin_action(
-            &mut ctx,
-            predicate_update(new_predicate.clone(), ProofType::Asm),
-        )
+        .submit_admin_action(&mut ctx, asm_stf_vk_update(new_predicate.clone()))
         .await
         .unwrap();
 
@@ -113,10 +109,7 @@ async fn test_proof_program_reflects_predicate_update() {
     // Submit an ASM predicate update (gets queued for StrataAdministrator role).
     let new_predicate = PredicateKey::never_accept();
     harness
-        .submit_admin_action(
-            &mut ctx,
-            predicate_update(new_predicate.clone(), ProofType::Asm),
-        )
+        .submit_admin_action(&mut ctx, asm_stf_vk_update(new_predicate.clone()))
         .await
         .unwrap();
 

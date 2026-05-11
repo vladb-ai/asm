@@ -3,12 +3,14 @@ use strata_asm_common::{
     logging::{debug, error, info},
 };
 use strata_asm_logs::{AsmStfUpdate, EePredicateKeyUpdate};
+use strata_asm_params::Role;
 use strata_asm_proto_admin_txs::{
-    actions::{MultisigAction, Sighash, UpdateAction, updates::predicate::ProofType},
+    actions::{MultisigAction, UpdateAction},
     parser::SignedPayload,
 };
 use strata_asm_proto_bridge_v1_msgs::{BridgeIncomingMsg, UpdateOperatorSetPayload};
 use strata_asm_proto_checkpoint_msgs::CheckpointIncomingMsg;
+use strata_crypto::threshold_signature::ThresholdConfigUpdate;
 use strata_identifiers::{AccountSerial, Buf32, L1Height, SYSTEM_RESERVED_ACCTS};
 use strata_predicate::{PredicateKey, PredicateTypeId};
 
@@ -33,7 +35,7 @@ pub(crate) fn handle_pending_updates(
     let queued_updates = state.process_queued(current_height);
     for queued in queued_updates {
         let (update_id, action) = queued.into_id_and_action();
-        let tx_type = action.tx_type();
+        let tx_type = action.update_tx_type();
         handle_update(state, relayer, action);
         info!(%update_id, %tx_type, "handled queued update");
     }
@@ -60,8 +62,8 @@ pub(crate) fn handle_action(
     current_height: L1Height,
     relayer: &mut impl MsgRelayer,
 ) -> Result<(), AdministrationError> {
-    // Determine the required role based on the action type and current queue state.
-    let role = state.resolve_action_role(&payload.action)?;
+    // Determine the required role; both update and cancel actions are self-describing.
+    let role = state.resolve_action_role(&payload.action);
 
     // Get the authority for this role and validate the action with the aggregated signature
     let authority = state
@@ -78,11 +80,7 @@ pub(crate) fn handle_action(
             // Updates with a non-zero confirmation depth are queued and enacted only after
             // `delay` more L1 blocks; until then they remain cancellable. A depth of zero
             // (surfaced as `None`) means "apply immediately" and bypasses the queue.
-            let tx_type = update
-                .tx_type()
-                .try_into()
-                .expect("UpdateAction::tx_type() always returns AdminTxType::Update(_)");
-            match state.confirmation_depth(tx_type) {
+            match state.confirmation_depth(update.update_tx_type()) {
                 Some(delay) => {
                     let activation_height = current_height + delay as u32;
                     let queued_update = QueuedUpdate::new(id, update, activation_height);
@@ -97,7 +95,17 @@ pub(crate) fn handle_action(
             state.increment_next_update_id();
         }
         MultisigAction::Cancel(cancel) => {
-            // Remove the target action from the queue
+            // The signature already covers the embedded update, so this equality check is
+            // belt-and-suspenders: turn what would otherwise be a generic verification
+            // failure into a precise, actionable error.
+            let queued = state
+                .find_queued(cancel.target_id())
+                .ok_or(AdministrationError::UnknownAction(*cancel.target_id()))?;
+            if queued.action() != cancel.update() {
+                return Err(AdministrationError::CancelUpdateMismatch {
+                    target_id: *cancel.target_id(),
+                });
+            }
             state.remove_queued(cancel.target_id());
         }
     }
@@ -124,30 +132,14 @@ fn handle_update(
     update: UpdateAction,
 ) {
     match update {
-        UpdateAction::Multisig(update) => {
-            if let Err(e) = state.apply_multisig_update(update.role(), update.config()) {
-                error!(
-                    "Failed to apply multisig update to role {:?}: {}",
-                    update.role(),
-                    e,
-                );
-            }
+        UpdateAction::StrataAdminMultisig(update) => {
+            apply_multisig(state, Role::StrataAdministrator, update.config());
         }
-        UpdateAction::VerifyingKey(update) => {
-            let (key, kind) = update.into_inner();
-            match kind {
-                ProofType::Asm => {
-                    let log_entry = AsmLogEntry::from_log(&AsmStfUpdate::new(key))
-                        .expect("AsmStfUpdate encoding is infallible");
-                    relayer.emit_log(log_entry);
-                }
-                ProofType::OLStf => {
-                    relay_checkpoint_predicate(relayer, key);
-                }
-                ProofType::EeStf => {
-                    relay_alpen_predicate_update(relayer, key);
-                }
-            }
+        UpdateAction::StrataSeqManagerMultisig(update) => {
+            apply_multisig(state, Role::StrataSequencerManager, update.config());
+        }
+        UpdateAction::AlpenAdminMultisig(update) => {
+            apply_multisig(state, Role::AlpenAdministrator, update.config());
         }
         UpdateAction::OperatorSet(update) => {
             let (add_members, remove_members) = update.into_inner();
@@ -157,6 +149,27 @@ fn handle_update(
             let new_key = update.into_inner();
             relay_checkpoint_sequencer_update(relayer, new_key);
         }
+        UpdateAction::OlStfVk(update) => {
+            relay_checkpoint_predicate(relayer, update.into_key());
+        }
+        UpdateAction::AsmStfVk(update) => {
+            let log_entry = AsmLogEntry::from_log(&AsmStfUpdate::new(update.into_key()))
+                .expect("AsmStfUpdate encoding is infallible");
+            relayer.emit_log(log_entry);
+        }
+        UpdateAction::EeStfVk(update) => {
+            relay_alpen_predicate_update(relayer, update.into_key());
+        }
+    }
+}
+
+fn apply_multisig(
+    state: &mut AdministrationSubprotoState,
+    role: Role,
+    config: &ThresholdConfigUpdate,
+) {
+    if let Err(e) = state.apply_multisig_update(role, config) {
+        error!("Failed to apply multisig update to role {:?}: {}", role, e);
     }
 }
 
@@ -210,22 +223,18 @@ mod tests {
     use rand::{rngs::OsRng, seq::SliceRandom, thread_rng};
     use strata_asm_common::{AsmLogEntry, InterprotoMsg, MsgRelayer};
     use strata_asm_logs::AsmStfUpdate;
-    use strata_asm_params::{AdminTxType, AdministrationInitConfig, ConfirmationDepths, Role};
+    use strata_asm_params::{AdministrationInitConfig, ConfirmationDepths, Role};
     use strata_asm_proto_admin_txs::{
         actions::{
-            CancelAction, MultisigAction, Sighash, UpdateAction,
-            updates::{
-                predicate::{PredicateUpdate, ProofType},
-                seq::SequencerUpdate,
-            },
+            CancelAction, MultisigAction, UpdateAction,
+            updates::{AsmStfVkUpdate, OlStfVkUpdate, SequencerUpdate},
         },
         parser::SignedPayload,
         test_utils::create_signature_set,
     };
     use strata_asm_proto_checkpoint_msgs::CheckpointIncomingMsg;
     use strata_crypto::{
-        keys::compressed::CompressedPublicKey,
-        threshold_signature::{SignatureSet, ThresholdConfig},
+        keys::compressed::CompressedPublicKey, threshold_signature::ThresholdConfig,
     };
     use strata_predicate::PredicateKey;
     use strata_test_utils_arb::ArbitraryGenerator;
@@ -317,7 +326,8 @@ mod tests {
             strata_seq_manager_multisig_update: depth,
             alpen_admin_multisig_update: depth,
             operator_update: depth,
-            sequencer_update: depth,
+            // Sequencer updates are designed to apply immediately (depth 0 sentinel).
+            sequencer_update: 0,
             ol_stf_vk_update: depth,
             asm_stf_vk_update: depth,
             ee_stf_vk_update: depth,
@@ -366,13 +376,7 @@ mod tests {
 
             let seqno = last_seqno + 1;
             let action = MultisigAction::Update(update.clone());
-            let sig_set = create_signature_set(
-                &admin_sks,
-                &signer_indices,
-                &action,
-                update.required_role(),
-                seqno,
-            );
+            let sig_set = create_signature_set(&admin_sks, &signer_indices, &action, seqno);
             let payload = SignedPayload::new(seqno, action, sig_set);
             handle_action(&mut state, payload, current_height, &mut relayer).unwrap();
 
@@ -396,13 +400,9 @@ mod tests {
                 .find_queued(&initial_next_id)
                 .expect("queued action must be found");
 
-            let tx_type = match update.tx_type() {
-                AdminTxType::Update(t) => t,
-                AdminTxType::Cancel => unreachable!(),
-            };
             let depth = params
                 .confirmation_depths
-                .get(tx_type)
+                .get(update.update_tx_type())
                 .expect("test config uses non-zero depths");
             assert_eq!(
                 queued_update.activation_height(),
@@ -432,26 +432,14 @@ mod tests {
         // Create an action and queue it with a valid seqno (> current authority seqno of 0).
         let valid_seqno = last_seqno + 1;
         let action = MultisigAction::Update(update.clone());
-        let sig_set = create_signature_set(
-            &admin_sks,
-            &signer_indices,
-            &action,
-            update.required_role(),
-            valid_seqno,
-        );
+        let sig_set = create_signature_set(&admin_sks, &signer_indices, &action, valid_seqno);
         let payload = SignedPayload::new(valid_seqno, action, sig_set);
         let res = handle_action(&mut state, payload, current_height, &mut relayer);
         assert!(res.is_ok());
 
         // Authority seqno is now 1. Try replaying with seqno 1 (<= current).
         let action = MultisigAction::Update(update.clone());
-        let sig_set = create_signature_set(
-            &admin_sks,
-            &signer_indices,
-            &action,
-            update.required_role(),
-            1,
-        );
+        let sig_set = create_signature_set(&admin_sks, &signer_indices, &action, 1);
 
         let payload = SignedPayload::new(1, action, sig_set);
         let res = handle_action(&mut state, payload, current_height, &mut relayer);
@@ -468,13 +456,7 @@ mod tests {
 
         // Try with seqno 0, which is also <= current seqno of 1.
         let action = MultisigAction::Update(update.clone());
-        let sig_set = create_signature_set(
-            &admin_sks,
-            &signer_indices,
-            &action,
-            update.required_role(),
-            0,
-        );
+        let sig_set = create_signature_set(&admin_sks, &signer_indices, &action, 0);
         let payload = SignedPayload::new(0, action, sig_set);
         let res = handle_action(&mut state, payload, current_height, &mut relayer);
         assert!(matches!(res, Err(AdministrationError::InvalidSeqno { .. })));
@@ -517,13 +499,8 @@ mod tests {
 
             let payload_seqno = last_seqno + 1;
             let action = MultisigAction::Update(update.clone());
-            let sig_set = create_signature_set(
-                &seq_manager_sks,
-                &signer_indices,
-                &action,
-                update.required_role(),
-                payload_seqno,
-            );
+            let sig_set =
+                create_signature_set(&seq_manager_sks, &signer_indices, &action, payload_seqno);
 
             let payload = SignedPayload::new(payload_seqno, action, sig_set);
             handle_action(&mut state, payload, current_height, &mut relayer).unwrap();
@@ -564,14 +541,10 @@ mod tests {
 
         let predicate = PredicateKey::always_accept();
 
-        let update = PredicateUpdate::new(predicate.clone(), ProofType::OLStf);
+        let update = UpdateAction::OlStfVk(OlStfVkUpdate::new(predicate.clone()));
         let update_id = state.next_update_id();
         let activation_height = 42;
-        state.enqueue(QueuedUpdate::new(
-            update_id,
-            update.into(),
-            activation_height,
-        ));
+        state.enqueue(QueuedUpdate::new(update_id, update, activation_height));
 
         handle_pending_updates(&mut state, &mut relayer, activation_height);
 
@@ -597,14 +570,10 @@ mod tests {
 
         let predicate = PredicateKey::always_accept();
 
-        let update = PredicateUpdate::new(predicate.clone(), ProofType::Asm);
+        let update = UpdateAction::AsmStfVk(AsmStfVkUpdate::new(predicate.clone()));
         let update_id = state.next_update_id();
         let activation_height = 42;
-        state.enqueue(QueuedUpdate::new(
-            update_id,
-            update.into(),
-            activation_height,
-        ));
+        state.enqueue(QueuedUpdate::new(update_id, update, activation_height));
 
         handle_pending_updates(&mut state, &mut relayer, activation_height);
 
@@ -647,13 +616,8 @@ mod tests {
             let payload_seqno = last_seqno + 1;
             let update_action = MultisigAction::Update(update);
 
-            let sig_set = create_signature_set(
-                &admin_sks,
-                &signer_indices,
-                &update_action,
-                Role::StrataAdministrator,
-                payload_seqno,
-            );
+            let sig_set =
+                create_signature_set(&admin_sks, &signer_indices, &update_action, payload_seqno);
 
             let payload = SignedPayload::new(payload_seqno, update_action, sig_set);
             handle_action(&mut state, payload, current_height, &mut relayer).unwrap();
@@ -665,21 +629,17 @@ mod tests {
 
         // Then cancel each queued update one by one based on the random order.
         for id in cancel_order {
-            let cancel_action = MultisigAction::Cancel(CancelAction::new(id));
-            let authorized_role = state.find_queued(&id).unwrap().action().required_role();
+            let queued_action = state.find_queued(&id).unwrap().action().clone();
+            let authorized_role = queued_action.required_role();
+            let cancel_action = MultisigAction::Cancel(CancelAction::new(id, queued_action));
             // Capture initial state before cancellation
             let last_seqno = state.authority(authorized_role).unwrap().last_seqno();
             let payload_seqno = last_seqno + 1;
             let initial_next_id = state.next_update_id();
             let initial_queued_len = state.queued().len();
 
-            let sig_set = create_signature_set(
-                &admin_sks,
-                &signer_indices,
-                &cancel_action,
-                authorized_role,
-                payload_seqno,
-            );
+            let sig_set =
+                create_signature_set(&admin_sks, &signer_indices, &cancel_action, payload_seqno);
 
             let payload = SignedPayload::new(payload_seqno, cancel_action, sig_set);
             handle_action(&mut state, payload, current_height, &mut relayer).unwrap();
@@ -705,18 +665,22 @@ mod tests {
     /// - Verify that handle_action returns UnknownAction error
     #[test]
     fn test_strata_administrator_non_existent_cancel() {
-        let mut arb = ArbitraryGenerator::new();
-        let (params, _, _) = create_test_params();
+        let (params, admin_sks, _) = create_test_params();
         let mut state = AdministrationSubprotoState::new(&params);
         let mut relayer = MockRelayer::<CheckpointIncomingMsg>::new();
-        let sig_set = SignatureSet::new(vec![]).unwrap();
         let current_height = 1000;
+        let signer_indices = [0u8, 2u8];
 
-        // Generate a random cancel action (likely targeting a non-existent ID)
-        let cancel_action: CancelAction = arb.generate();
-        let cancel_action = MultisigAction::Cancel(cancel_action);
+        // Build a cancel whose embedded update routes to StrataAdministrator (so admin_sks
+        // can sign it), but whose target_id is not in the (empty) queue.
+        let nonexistent_id = 42;
+        let update = get_strata_administrator_update_actions(1).pop().unwrap();
+        let cancel_action = MultisigAction::Cancel(CancelAction::new(nonexistent_id, update));
 
-        let payload = SignedPayload::new(arb.generate(), cancel_action, sig_set);
+        let payload_seqno = 1;
+        let sig_set =
+            create_signature_set(&admin_sks, &signer_indices, &cancel_action, payload_seqno);
+        let payload = SignedPayload::new(payload_seqno, cancel_action, sig_set);
         let res = handle_action(&mut state, payload, current_height, &mut relayer);
 
         assert!(matches!(res, Err(AdministrationError::UnknownAction(_))));
@@ -740,34 +704,24 @@ mod tests {
             .first()
             .unwrap()
             .clone();
-        let update_action = MultisigAction::Update(update);
+        let update_action = MultisigAction::Update(update.clone());
 
         // create signer indices (signers 0 and 2)
         let signer_indices = [0u8, 2u8];
 
         // Use seqno > initial (0) to pass validation
         let update_seqno = last_seqno + 1;
-        let sig_set = create_signature_set(
-            &admin_sks,
-            &signer_indices,
-            &update_action,
-            Role::StrataAdministrator,
-            update_seqno,
-        );
+        let sig_set =
+            create_signature_set(&admin_sks, &signer_indices, &update_action, update_seqno);
 
         let payload = SignedPayload::new(update_seqno, update_action, sig_set);
         handle_action(&mut state, payload, current_height, &mut relayer).unwrap();
 
         // Cancel the update action (authority seqno is now 1, use seqno 2)
-        let cancel_action = MultisigAction::Cancel(CancelAction::new(update_id));
+        let cancel_action = MultisigAction::Cancel(CancelAction::new(update_id, update.clone()));
         let cancel_seqno = last_seqno + 2;
-        let sig_set = create_signature_set(
-            &admin_sks,
-            &signer_indices,
-            &cancel_action,
-            Role::StrataAdministrator,
-            cancel_seqno,
-        );
+        let sig_set =
+            create_signature_set(&admin_sks, &signer_indices, &cancel_action, cancel_seqno);
 
         let payload = SignedPayload::new(cancel_seqno, cancel_action, sig_set);
         let res = handle_action(&mut state, payload, current_height, &mut relayer);
@@ -775,15 +729,10 @@ mod tests {
         assert!(res.is_ok());
 
         // Try cancelling the update action again (authority seqno is now 2, use seqno 3)
-        let cancel_action = MultisigAction::Cancel(CancelAction::new(update_id));
+        let cancel_action = MultisigAction::Cancel(CancelAction::new(update_id, update));
         let retry_seqno = last_seqno + 3;
-        let sig_set = create_signature_set(
-            &admin_sks,
-            &signer_indices,
-            &cancel_action,
-            Role::StrataAdministrator,
-            retry_seqno,
-        );
+        let sig_set =
+            create_signature_set(&admin_sks, &signer_indices, &cancel_action, retry_seqno);
         let payload = SignedPayload::new(retry_seqno, cancel_action, sig_set);
         let res = handle_action(&mut state, payload, current_height, &mut relayer);
         assert!(res.is_err());
@@ -804,26 +753,14 @@ mod tests {
 
         // First action at seqno 1 (last_seqno is 0)
         let action = MultisigAction::Update(updates[0].clone());
-        let sig_set = create_signature_set(
-            &admin_sks,
-            &signer_indices,
-            &action,
-            Role::StrataAdministrator,
-            1,
-        );
+        let sig_set = create_signature_set(&admin_sks, &signer_indices, &action, 1);
         let payload = SignedPayload::new(1, action, sig_set);
         handle_action(&mut state, payload, current_height, &mut relayer).unwrap();
 
         // Second action at seqno 11 (last_seqno is 1, gap = 10 = max_seqno_gap)
         let gap_seqno = 1 + state.max_seqno_gap().get() as u64;
         let action = MultisigAction::Update(updates[1].clone());
-        let sig_set = create_signature_set(
-            &admin_sks,
-            &signer_indices,
-            &action,
-            Role::StrataAdministrator,
-            gap_seqno,
-        );
+        let sig_set = create_signature_set(&admin_sks, &signer_indices, &action, gap_seqno);
         let payload = SignedPayload::new(gap_seqno, action, sig_set);
         let res = handle_action(&mut state, payload, current_height, &mut relayer);
 
@@ -847,13 +784,7 @@ mod tests {
         // Try action at seqno 11 (last_seqno is 0, gap = 11 > max_seqno_gap of 10)
         let too_far_seqno = state.max_seqno_gap().get() as u64 + 1;
         let action = MultisigAction::Update(update);
-        let sig_set = create_signature_set(
-            &admin_sks,
-            &signer_indices,
-            &action,
-            Role::StrataAdministrator,
-            too_far_seqno,
-        );
+        let sig_set = create_signature_set(&admin_sks, &signer_indices, &action, too_far_seqno);
         let payload = SignedPayload::new(too_far_seqno, action, sig_set);
         let res = handle_action(&mut state, payload, current_height, &mut relayer);
 

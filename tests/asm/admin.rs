@@ -28,8 +28,8 @@ use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoind_async_client::traits::Reader;
 use harness::{
     admin::{
-        cancel_update, create_test_admin_setup, multisig_config_update, operator_set_update,
-        predicate_update, sequencer_update, AdminExt,
+        cancel_update, create_test_admin_setup, ee_stf_vk_update, multisig_config_update,
+        ol_stf_vk_update, operator_set_update, sequencer_update, AdminExt,
     },
     test_harness::AsmTestHarnessBuilder,
 };
@@ -38,8 +38,8 @@ use rand::rngs::OsRng;
 use ssz::Encode;
 use strata_asm_params::Role;
 use strata_asm_proto_admin_txs::{
-    actions::updates::predicate::ProofType, constants::ADMINISTRATION_SUBPROTOCOL_ID,
-    parser::SignedPayload, test_utils::create_signature_set,
+    constants::ADMINISTRATION_SUBPROTOCOL_ID, parser::SignedPayload,
+    test_utils::create_signature_set,
 };
 use strata_asm_proto_bridge_v1_txs::test_utils::create_test_operators;
 use strata_crypto::{
@@ -193,7 +193,7 @@ async fn test_predicate_update_is_queued() {
 
     let new_predicate = PredicateKey::always_accept();
     harness
-        .submit_admin_action(&mut ctx, predicate_update(new_predicate, ProofType::OLStf))
+        .submit_admin_action(&mut ctx, ol_stf_vk_update(new_predicate))
         .await
         .unwrap();
 
@@ -311,10 +311,8 @@ async fn test_cancel_removes_queued_update() {
     assert_eq!(*state.queued()[0].id(), 0, "Queued update should have ID 0");
 
     // Cancel the queued update
-    harness
-        .submit_admin_action(&mut ctx, cancel_update(0))
-        .await
-        .unwrap();
+    let cancel = cancel_update(0, &state);
+    harness.submit_admin_action(&mut ctx, cancel).await.unwrap();
 
     let state = harness.admin_state().unwrap();
     assert_eq!(state.queued().len(), 0, "Queued update should be cancelled");
@@ -351,13 +349,7 @@ async fn test_wrong_key_rejected() {
     // Sign with wrong key
     let action = sequencer_update([2u8; 32]);
     let seqno = 1;
-    let sig_set = create_signature_set(
-        &[wrong_privkey],
-        &[0u8],
-        &action,
-        Role::StrataSequencerManager,
-        seqno,
-    );
+    let sig_set = create_signature_set(&[wrong_privkey], &[0u8], &action, seqno);
     let signed = SignedPayload::new(seqno, action.clone(), sig_set);
     let payload = signed.as_ssz_bytes();
 
@@ -393,13 +385,9 @@ async fn test_corrupted_signature_rejected() {
 
     let action = sequencer_update([88u8; 32]);
     let seqno = 1;
-    let sig_set = create_signature_set(
-        ctx.privkeys(),
-        ctx.signer_indices(),
-        &action,
-        Role::StrataSequencerManager,
-        seqno,
-    );
+    let role = action.required_role();
+    let sig_set =
+        create_signature_set(ctx.privkeys(role), ctx.signer_indices(role), &action, seqno);
 
     // Corrupt the signature
     let mut indexed_sigs = sig_set.into_inner();
@@ -429,6 +417,228 @@ async fn test_corrupted_signature_rejected() {
         state.next_update_id(),
         0,
         "Corrupted signature should be rejected"
+    );
+}
+
+// ============================================================================
+// Role-Based Authorization
+// ============================================================================
+
+/// Verifies an OL STF VK update signed by the AlpenAdministrator is rejected.
+///
+/// OL STF VK updates require the StrataAdministrator role. The AlpenAdministrator's key
+/// is valid for its own role but does not satisfy the StrataAdministrator's threshold
+/// config — so the signature must fail verification, leaving all role seqnos at zero.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ol_stf_vk_signed_by_alpen_admin_rejected() {
+    let (admin_config, mut ctx) = create_test_admin_setup(2);
+    let harness = AsmTestHarnessBuilder::default()
+        .with_admin_config(admin_config)
+        .build()
+        .await
+        .unwrap();
+
+    // Initialize subprotocols
+    harness.mine_block(None).await.unwrap();
+
+    // Sign an OL STF VK update (requires StrataAdministrator) with the AlpenAdministrator's
+    // keys. The handler resolves the required role from the action and verifies against
+    // StrataAdministrator's threshold config — which rejects the AlpenAdministrator's sig.
+    harness
+        .submit_admin_action_as_role(
+            &mut ctx,
+            ol_stf_vk_update(PredicateKey::always_accept()),
+            Role::AlpenAdministrator,
+        )
+        .await
+        .unwrap();
+
+    let state = harness.admin_state().unwrap();
+    assert_eq!(
+        state.queued().len(),
+        0,
+        "OL STF VK update signed by wrong role should not be queued"
+    );
+    assert_eq!(
+        state.next_update_id(),
+        0,
+        "Update ID should not increment for rejected tx"
+    );
+    // No role's seqno should advance — verification fails before the seqno update.
+    for role in [
+        Role::StrataAdministrator,
+        Role::StrataSequencerManager,
+        Role::AlpenAdministrator,
+    ] {
+        assert_eq!(
+            state.authority(role).unwrap().last_seqno(),
+            0,
+            "{role:?} seqno should not advance for rejected tx",
+        );
+    }
+}
+
+/// Verifies an OL STF VK update signed by the StrataSequencerManager is rejected.
+///
+/// Companion to the AlpenAdministrator case: a valid signer for some role still cannot
+/// authorize an action belonging to a different role.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ol_stf_vk_signed_by_seq_manager_rejected() {
+    let (admin_config, mut ctx) = create_test_admin_setup(2);
+    let harness = AsmTestHarnessBuilder::default()
+        .with_admin_config(admin_config)
+        .build()
+        .await
+        .unwrap();
+
+    harness.mine_block(None).await.unwrap();
+
+    harness
+        .submit_admin_action_as_role(
+            &mut ctx,
+            ol_stf_vk_update(PredicateKey::always_accept()),
+            Role::StrataSequencerManager,
+        )
+        .await
+        .unwrap();
+
+    let state = harness.admin_state().unwrap();
+    assert_eq!(
+        state.queued().len(),
+        0,
+        "OL STF VK update signed by wrong role should not be queued"
+    );
+    assert_eq!(
+        state.next_update_id(),
+        0,
+        "Update ID should not increment for rejected tx"
+    );
+}
+
+// ============================================================================
+// Cancel Role Authorization
+// ============================================================================
+//
+// Cancel actions derive their required role from the embedded update, not from the
+// signer or any default. These tests guard that resolution path: an AlpenAdministrator-
+// queued update must be cancellable only by the AlpenAdministrator, and any other role
+// holding a valid signing key for its own authority must not be able to cancel it.
+
+/// An AlpenAdministrator can cancel an update it previously queued.
+///
+/// Establishes the positive baseline for cancel-path role resolution: the handler must
+/// walk the embedded update to find AlpenAdministrator and accept the AlpenAdministrator's
+/// signature.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cancel_of_alpen_update_by_alpen_admin_succeeds() {
+    let (admin_config, mut ctx) = create_test_admin_setup(2);
+    let harness = AsmTestHarnessBuilder::default()
+        .with_admin_config(admin_config)
+        .build()
+        .await
+        .unwrap();
+
+    harness.mine_block(None).await.unwrap();
+
+    // Queue an Alpen-authorized update; submit_admin_action auto-routes to alpen.
+    harness
+        .submit_admin_action(&mut ctx, ee_stf_vk_update(PredicateKey::always_accept()))
+        .await
+        .unwrap();
+
+    let state = harness.admin_state().unwrap();
+    assert_eq!(state.queued().len(), 1, "Setup: update should be queued");
+
+    // Cancel: auto-routing again picks alpen (the embedded update's required role).
+    let cancel = cancel_update(0, &state);
+    harness.submit_admin_action(&mut ctx, cancel).await.unwrap();
+
+    let state = harness.admin_state().unwrap();
+    assert_eq!(
+        state.queued().len(),
+        0,
+        "Cancel signed by AlpenAdministrator should remove the queued update"
+    );
+}
+
+/// The StrataAdministrator cannot cancel an Alpen-authorized queued update.
+///
+/// The cancel embeds the original AlpenAdministrator update, so role resolution must
+/// land on AlpenAdministrator and verification fails against the StrataAdministrator's
+/// signature. The explicit seqno=2 sits above alpen's `last_seqno` (=1 after the initial
+/// queue), so signature verification is the unambiguous rejection path — not replay
+/// protection — which would otherwise mask a buggy role resolution.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cancel_of_alpen_update_by_strata_admin_rejected() {
+    let (admin_config, mut ctx) = create_test_admin_setup(2);
+    let harness = AsmTestHarnessBuilder::default()
+        .with_admin_config(admin_config)
+        .build()
+        .await
+        .unwrap();
+
+    harness.mine_block(None).await.unwrap();
+
+    harness
+        .submit_admin_action(&mut ctx, ee_stf_vk_update(PredicateKey::always_accept()))
+        .await
+        .unwrap();
+
+    let state = harness.admin_state().unwrap();
+    let cancel = cancel_update(0, &state);
+
+    harness
+        .submit_admin_action_as_role_with_seqno(&ctx, cancel, Role::StrataAdministrator, 2)
+        .await
+        .unwrap();
+
+    let state = harness.admin_state().unwrap();
+    assert_eq!(
+        state.queued().len(),
+        1,
+        "Cancel signed by StrataAdministrator should be rejected; queue must be intact"
+    );
+    assert_eq!(
+        state
+            .authority(Role::AlpenAdministrator)
+            .unwrap()
+            .last_seqno(),
+        1,
+        "Alpen authority seqno should not advance for a rejected cancel"
+    );
+}
+
+/// Symmetric to the StrataAdministrator case: the StrataSequencerManager cannot
+/// cancel an Alpen-authorized queued update either.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cancel_of_alpen_update_by_seq_manager_rejected() {
+    let (admin_config, mut ctx) = create_test_admin_setup(2);
+    let harness = AsmTestHarnessBuilder::default()
+        .with_admin_config(admin_config)
+        .build()
+        .await
+        .unwrap();
+
+    harness.mine_block(None).await.unwrap();
+
+    harness
+        .submit_admin_action(&mut ctx, ee_stf_vk_update(PredicateKey::always_accept()))
+        .await
+        .unwrap();
+
+    let state = harness.admin_state().unwrap();
+    let cancel = cancel_update(0, &state);
+
+    harness
+        .submit_admin_action_as_role_with_seqno(&ctx, cancel, Role::StrataSequencerManager, 2)
+        .await
+        .unwrap();
+
+    let state = harness.admin_state().unwrap();
+    assert_eq!(
+        state.queued().len(),
+        1,
+        "Cancel signed by StrataSequencerManager should be rejected; queue must be intact"
     );
 }
 
@@ -495,9 +705,9 @@ async fn test_multiple_zero_depth_updates_same_block() {
     let action2 = sequencer_update([8u8; 32]);
     let action3 = sequencer_update([9u8; 32]);
 
-    let payload1 = ctx.sign(&action1).unwrap();
-    let payload2 = ctx.sign(&action2).unwrap();
-    let payload3 = ctx.sign(&action3).unwrap();
+    let payload1 = ctx.sign(&action1);
+    let payload2 = ctx.sign(&action2);
+    let payload3 = ctx.sign(&action3);
 
     let tx1 = harness
         .build_envelope_tx(action1.tag(), payload1)
@@ -586,10 +796,8 @@ async fn test_cancel_prevents_queued_update_activation() {
     assert_eq!(state.next_update_id(), 1, "Update ID should be 1");
 
     // Submit cancel in the next block (before activation)
-    harness
-        .submit_admin_action(&mut ctx, cancel_update(0))
-        .await
-        .unwrap();
+    let cancel = cancel_update(0, &state);
+    harness.submit_admin_action(&mut ctx, cancel).await.unwrap();
 
     // Verify update was cancelled
     let state = harness.admin_state().unwrap();

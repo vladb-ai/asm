@@ -1,6 +1,6 @@
 use arbitrary::Arbitrary;
 use ssz_derive::{Decode, Encode};
-use strata_asm_params::AdminTxType;
+use strata_asm_params::{AdminTxType, Role};
 use strata_l1_txfmt::TagData;
 
 mod cancel;
@@ -8,7 +8,7 @@ mod sighash;
 pub mod updates;
 
 pub use cancel::CancelAction;
-pub use sighash::Sighash;
+pub(crate) use sighash::{IndentedDetails, RenderSigningMessage};
 pub use updates::UpdateAction;
 
 use crate::constants::ADMINISTRATION_SUBPROTOCOL_ID;
@@ -25,7 +25,7 @@ pub enum MultisigAction {
     Update(UpdateAction),
 }
 
-impl Sighash for MultisigAction {
+impl RenderSigningMessage for MultisigAction {
     fn tx_type(&self) -> AdminTxType {
         match self {
             MultisigAction::Cancel(c) => c.tx_type(),
@@ -33,10 +33,10 @@ impl Sighash for MultisigAction {
         }
     }
 
-    fn sighash_payload(&self) -> Vec<u8> {
+    fn render_details(&self, details: &mut IndentedDetails<'_>) {
         match self {
-            MultisigAction::Cancel(c) => c.sighash_payload(),
-            MultisigAction::Update(u) => u.sighash_payload(),
+            MultisigAction::Cancel(c) => c.render_details(details),
+            MultisigAction::Update(u) => u.render_details(details),
         }
     }
 }
@@ -49,5 +49,17 @@ impl MultisigAction {
     pub fn tag(&self) -> TagData {
         TagData::new(ADMINISTRATION_SUBPROTOCOL_ID, self.tx_type().into(), vec![])
             .expect("empty aux data always fits")
+    }
+
+    /// The role authorized to enact this action.
+    ///
+    /// Both variants are self-describing: an update carries its type directly, and a cancel
+    /// embeds the [`UpdateAction`] it targets — so the role is derivable without external
+    /// context (queue lookup, authority registry).
+    pub fn required_role(&self) -> Role {
+        match self {
+            MultisigAction::Update(update) => update.required_role(),
+            MultisigAction::Cancel(cancel) => cancel.update().required_role(),
+        }
     }
 }
