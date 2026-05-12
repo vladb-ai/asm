@@ -43,6 +43,7 @@ bincode = { workspace = true, optional = true }
 bitcoin.workspace = true
 bitcoincore-zmq = { version = "1.5.2", features = ["async"] }
 bitcoind-async-client.workspace = true
+borsh = { workspace = true, optional = true }
 clap.workspace = true
 futures.workspace = true
 jsonrpsee = { workspace = true, features = ["server", "macros"] }
@@ -61,9 +62,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 zkaleido.workspace = true
 zkaleido-native-adapter.workspace = true
 zkaleido-sp1-groth16-verifier = { workspace = true, optional = true }
-zkaleido-sp1-host = { workspace = true, optional = true, features = [
-  "remote-prover",
-] }
+zkaleido-sp1-host = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -77,4 +76,5 @@ sp1 = [
   "dep:sp1-verifier",
   "dep:sp1-sdk",
   "dep:bincode",
+  "dep:borsh",
 ]

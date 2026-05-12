@@ -1,11 +1,10 @@
-use std::{fs, path::Path, sync::LazyLock};
+use std::{fs, path::Path};
 
 use moho_recursive_proof::{
     test_utils::create_predicate_inclusion_proof, MohoRecursiveInput, MohoRecursiveProgram,
 };
 use moho_runtime_interface::MohoProgram;
 use moho_types::{StateRefAttestation, StepMohoAttestation, StepMohoProof};
-use sp1_sdk::HashableKey;
 use ssz::Decode;
 use strata_asm_proof_impl::{
     moho_program::program::AsmStfProgram,
@@ -17,47 +16,41 @@ use strata_asm_sp1_guest_builder::MOHO_ELF_PATH;
 use strata_asm_spec::StrataAsmSpec;
 use strata_asm_stf::compute_asm_transition;
 use strata_predicate::PredicateKey;
-use zkaleido::{PerformanceReport, ProofReceiptWithMetadata, ZkVmProgram, ZkVmProgramPerf};
+use zkaleido::{ExecutionSummary, ProofReceiptWithMetadata, ZkVmExecutor, ZkVmProgram};
 use zkaleido_sp1_groth16_verifier::VK_HASH_PREFIX_LENGTH;
 use zkaleido_sp1_host::SP1Host;
 
 use crate::programs::compute_sp1_predicate_key;
 
-static MOHO_HOST: LazyLock<SP1Host> = LazyLock::new(|| {
+async fn init_moho_host() -> SP1Host {
     let elf = fs::read(MOHO_ELF_PATH)
         .unwrap_or_else(|err| panic!("failed to read guest elf at {MOHO_ELF_PATH}: {err}"));
-    SP1Host::init(&elf)
-});
-
-pub(crate) fn gen_perf_report() -> PerformanceReport {
-    let input = create_moho_recursive_input();
-    MohoRecursiveProgram::perf_report(&input, &*MOHO_HOST)
-        .expect("failed to generate performance report")
+    SP1Host::init(&elf).await
 }
 
-pub(crate) fn gen_proof() -> (String, ProofReceiptWithMetadata) {
-    let input = create_moho_recursive_input();
-    let proof = MohoRecursiveProgram::prove(&input, &*MOHO_HOST)
-        .expect("failed to generate performance report");
-    (MOHO_HOST.proving_key.vk.bytes32(), proof)
+pub(crate) async fn gen_execution_summary() -> ExecutionSummary {
+    let host = init_moho_host().await;
+    let input = create_moho_recursive_input(&host);
+    <MohoRecursiveProgram as ZkVmProgram>::execute(&input, &host)
+        .expect("failed to generate execution summary")
 }
 
-pub(crate) fn compute_moho_predicate_key() -> PredicateKey {
-    let vk = MOHO_HOST.proving_key.vk.bytes32_raw();
-    compute_sp1_predicate_key(vk)
+pub(crate) async fn gen_proof() -> ProofReceiptWithMetadata {
+    let host = init_moho_host().await;
+    let input = create_moho_recursive_input(&host);
+    MohoRecursiveProgram::prove(&input, &host).expect("failed to generate performance report")
 }
 
-pub(crate) fn load_asm_stf_predicate_and_proof() -> (PredicateKey, StepMohoProof) {
-    const ASM_PROGRAM_ID_STR: &str =
-        "0061de0996d4cc66d710d9ad80585ecaba0f64b9c089b606ad635c5d0408f59b";
-    let asm_program_id: [u8; 32] = hex::decode(ASM_PROGRAM_ID_STR).unwrap().try_into().unwrap();
-    let asm_predicate = compute_sp1_predicate_key(asm_program_id);
+fn compute_moho_predicate_key(host: &SP1Host) -> PredicateKey {
+    compute_sp1_predicate_key(host.program_id().0)
+}
 
-    let proof_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-        "asm-stf_0x{}_SP1_v5.0.0.proof.bin",
-        ASM_PROGRAM_ID_STR
-    ));
+fn load_asm_stf_predicate_and_proof() -> (PredicateKey, StepMohoProof) {
+    let proof_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("asm-stf_SP1_v6.1.0.proof.bin");
     let asm_stf_proof = ProofReceiptWithMetadata::load(proof_path).expect("failed to open proof");
+
+    let asm_predicate = compute_sp1_predicate_key(asm_stf_proof.metadata().program_id().0);
+
     let proven_moho_attestation =
         StepMohoAttestation::from_ssz_bytes(asm_stf_proof.receipt().public_values().as_bytes())
             .unwrap();
@@ -68,7 +61,7 @@ pub(crate) fn load_asm_stf_predicate_and_proof() -> (PredicateKey, StepMohoProof
     (asm_predicate, incremental_step_proof)
 }
 
-pub(crate) fn create_moho_recursive_input() -> MohoRecursiveInput {
+fn create_moho_recursive_input(host: &SP1Host) -> MohoRecursiveInput {
     let input = create_asm_step_input();
     let asm_pre_state = create_deterministic_genesis_anchor_state(input.block());
     let (asm_predicate, incremental_step_proof) = load_asm_stf_predicate_and_proof();
@@ -108,7 +101,7 @@ pub(crate) fn create_moho_recursive_input() -> MohoRecursiveInput {
     let step_predicate_merkle_proof = create_predicate_inclusion_proof(&moho_pre_state);
 
     MohoRecursiveInput::new(
-        compute_moho_predicate_key(),
+        compute_moho_predicate_key(host),
         None,
         incremental_step_proof,
         asm_predicate,
