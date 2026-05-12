@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use bitcoin::{OutPoint, Transaction, TxOut, Txid};
-use strata_asm_manifest_types::Hash32;
+use strata_asm_manifest_types::AsmManifestHash;
 
 use crate::{
     AsmHistoryAccumulatorState, AuxError, AuxResult, RawBitcoinTx,
@@ -28,7 +28,7 @@ pub struct VerifiedAuxData {
     /// Verified Bitcoin transactions indexed by txid
     txs: HashMap<Txid, Transaction>,
     /// Verified manifest hashes indexed by block height
-    manifest_hashes: HashMap<u64, Hash32>,
+    manifest_hashes: HashMap<u64, AsmManifestHash>,
 }
 
 impl VerifiedAuxData {
@@ -41,7 +41,10 @@ impl VerifiedAuxData {
     ///
     /// * `txs` - Pre-verified Bitcoin transactions indexed by txid
     /// * `manifest_hashes` - Pre-verified manifest hashes indexed by block height
-    fn new(txs: HashMap<Txid, Transaction>, manifest_hashes: HashMap<u64, Hash32>) -> Self {
+    fn new(
+        txs: HashMap<Txid, Transaction>,
+        manifest_hashes: HashMap<u64, AsmManifestHash>,
+    ) -> Self {
         Self {
             txs,
             manifest_hashes,
@@ -107,7 +110,7 @@ impl VerifiedAuxData {
     fn verify_and_index_manifest_hashes(
         hashes: &[VerifiableManifestHash],
         manifest_mmr: &AsmHistoryAccumulatorState,
-    ) -> AuxResult<HashMap<u64, Hash32>> {
+    ) -> AuxResult<HashMap<u64, AsmManifestHash>> {
         let mut manifest_hashes = HashMap::with_capacity(hashes.len());
 
         for item in hashes {
@@ -160,7 +163,7 @@ impl VerifiedAuxData {
     /// # Errors
     ///
     /// Returns `AuxError::ManifestHashNotFound` if the hash is not found at the given height.
-    pub fn get_manifest_hash(&self, height: u64) -> AuxResult<Hash32> {
+    pub fn get_manifest_hash(&self, height: u64) -> AuxResult<AsmManifestHash> {
         self.manifest_hashes
             .get(&height)
             .copied()
@@ -173,8 +176,15 @@ impl VerifiedAuxData {
     ///
     /// # Errors
     ///
-    /// Returns an error if any hash in the range is not found.
-    pub fn get_manifest_hashes(&self, start: u64, end: u64) -> AuxResult<Vec<Hash32>> {
+    /// Returns [`AuxError::InvertedManifestRange`] if `start > end`. Callers that have
+    /// no manifests to fetch (e.g. checkpoints with zero L1 progress) must skip this
+    /// call entirely rather than passing an inverted range.
+    ///
+    /// Returns [`AuxError::ManifestHashNotFound`] if any hash in the range is not found.
+    pub fn get_manifest_hashes(&self, start: u64, end: u64) -> AuxResult<Vec<AsmManifestHash>> {
+        if start > end {
+            return Err(AuxError::InvertedManifestRange { start, end });
+        }
         (start..=end)
             .map(|idx| self.get_manifest_hash(idx))
             .collect()
@@ -236,5 +246,21 @@ mod tests {
         let txid: Buf32 = [0xFF; 32].into();
         let result = verified.get_bitcoin_tx(txid.to_txid());
         assert!(matches!(result, Err(AuxError::BitcoinTxNotFound { .. })));
+    }
+
+    #[test]
+    fn test_get_manifest_hashes_inverted_range_errors() {
+        let accumulator_state = AsmHistoryAccumulatorState::new(16);
+        let aux_data = AuxData::default();
+        let verified = VerifiedAuxData::try_new(&aux_data, &accumulator_state).unwrap();
+
+        let result = verified.get_manifest_hashes(101, 100);
+        assert!(matches!(
+            result,
+            Err(AuxError::InvertedManifestRange {
+                start: 101,
+                end: 100
+            })
+        ));
     }
 }

@@ -7947,26 +7947,15 @@ dependencies = [
 name = "strata-asm-proto-checkpoint"
 version = "0.1.0"
 dependencies = [
- "bitcoin-bosd 0.10.0",
- "ssz",
- "ssz_derive",
- "ssz_primitives",
- "ssz_types",
  "strata-asm-common",
  "strata-asm-logs",
  "strata-asm-params",
  "strata-asm-proto-bridge-v1-msgs",
- "strata-asm-proto-bridge-v1-types",
  "strata-asm-proto-checkpoint-msgs",
  "strata-asm-proto-checkpoint-txs",
  "strata-asm-proto-checkpoint-types",
- "strata-btc-types",
- "strata-codec",
- "strata-crypto",
+ "strata-checkpoint-verification",
  "strata-identifiers",
- "strata-predicate",
- "strata-test-utils-checkpoint",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -8254,6 +8243,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "strata-checkpoint-verification"
+version = "0.1.0"
+dependencies = [
+ "bitcoin-bosd 0.10.0",
+ "ssz",
+ "ssz_codegen",
+ "ssz_derive",
+ "ssz_primitives",
+ "ssz_types",
+ "strata-asm-manifest-types",
+ "strata-asm-params",
+ "strata-asm-proto-bridge-v1-types",
+ "strata-asm-proto-checkpoint-types",
+ "strata-btc-types",
+ "strata-codec",
+ "strata-crypto",
+ "strata-identifiers",
+ "strata-predicate",
+ "strata-test-utils-checkpoint",
+ "thiserror 2.0.18",
+ "tree_hash",
+ "tree_hash_derive",
+ "zkaleido-logging",
+]
+
+[[package]]
 name = "strata-codec"
 version = "0.1.0"
 source = "git+https://github.com/alpenlabs/strata-common?tag=v0.1.0-alpha-rc21#bb060d613880d8d4c8decd0e7544acb54e4d5a25"
@@ -8473,6 +8488,7 @@ dependencies = [
  "rand 0.8.5",
  "ssz",
  "strata-asm-common",
+ "strata-asm-manifest-types",
  "strata-asm-proto-checkpoint-txs",
  "strata-asm-proto-checkpoint-types",
  "strata-crypto",

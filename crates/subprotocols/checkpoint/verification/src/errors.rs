@@ -1,4 +1,4 @@
-use strata_asm_common::AuxError;
+use strata_btc_types::BitcoinAmount;
 use strata_identifiers::Epoch;
 use strata_predicate::{PredicateError, PredicateTypeId};
 use thiserror::Error;
@@ -14,10 +14,6 @@ pub enum CheckpointValidationError {
     /// The sequencer predicate is invalid or does not match the envelope.
     #[error("invalid sequencer predicate: {0}")]
     InvalidSequencerPredicate(#[from] InvalidSequencerPredicate),
-
-    /// Failed to retrieve manifest hashes from auxiliary data.
-    #[error("invalid auxiliary data: {0}")]
-    InvalidAux(#[from] AuxError),
 }
 
 /// Sequencer predicate verification failed.
@@ -98,22 +94,30 @@ pub enum InvalidCheckpointPayload {
     #[error("epoch overflow: verified tip epoch is at maximum value")]
     EpochOverflow,
 
-    /// L1 height counter overflow.
-    #[error("L1 height overflow: verified tip L1 height is at maximum value")]
-    L1HeightOverflow,
-
-    /// Withdrawal intents cannot be matched to available deposit UTXOs.
+    /// Withdrawal intents exceed the available bridge UTXO count.
     ///
-    /// Each withdrawal requires an exact-denomination UTXO match. This error is returned when
-    /// a withdrawal intent's amount does not match any available deposit denomination, or when
-    /// there are not enough UTXOs of the required denomination. The checkpoint is rejected to
-    /// prevent the bridge from dispatching unassignable withdrawals.
+    /// Returned when there are not enough available UTXOs to cover the requested withdrawal
+    /// intents. The checkpoint is rejected to prevent the bridge from dispatching
+    /// unassignable withdrawals.
     #[error(
-        "withdrawal intents cannot be honored: no exact denomination match available (available {available_sat} sat across all denominations, withdrawals require {required_sat} sat)"
+        "withdrawal intents cannot be honored: insufficient UTXOs (available {available} sat, withdrawals require {required} sat)"
     )]
     InsufficientFunds {
-        available_sat: u64,
-        required_sat: u64,
+        available: BitcoinAmount,
+        required: BitcoinAmount,
+    },
+
+    /// A withdrawal intent's amount is not a positive multiple of the bridge denomination.
+    ///
+    /// The bridge has a single deposit denomination; every withdrawal intent must carry a
+    /// positive integer multiple of that amount. Mismatches indicate either a malformed
+    /// intent from OL or a bug upstream of the checkpoint subprotocol.
+    #[error(
+        "withdrawal intent amount must be a positive multiple of denomination {expected} sat, got {actual} sat"
+    )]
+    DenominationMismatch {
+        expected: BitcoinAmount,
+        actual: BitcoinAmount,
     },
 }
 

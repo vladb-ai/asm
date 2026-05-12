@@ -24,6 +24,7 @@ members = [
   "crates/subprotocols/checkpoint/txs",
   "crates/subprotocols/checkpoint/msgs",
   "crates/subprotocols/checkpoint/types",
+  "crates/subprotocols/checkpoint/verification",
   "crates/subprotocols/debug-v1/subprotocol",
   "crates/subprotocols/txs-test-utils",
   "crates/test-utils/arb",
@@ -82,6 +83,7 @@ strata-asm-spec-debug = { path = "crates/spec-debug" }
 strata-asm-stf = { path = "crates/stf" }
 strata-asm-worker = { path = "crates/worker" }
 strata-btc-verification = { path = "crates/btc-verification" }
+strata-checkpoint-verification = { path = "crates/subprotocols/checkpoint/verification" }
 strata-test-utils-arb = { path = "crates/test-utils/arb" }
 strata-test-utils-btc = { path = "crates/test-utils/btc" }
 strata-test-utils-btcio = { path = "crates/test-utils/btcio" }
