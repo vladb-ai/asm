@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bitcoind_async_client::{Auth, Client};
+use strata_asm_common::MMR_SENTINEL_DUMMY_LEAF;
 use strata_asm_params::AsmParams;
 use strata_asm_proof_db::{SledMohoStateDb, SledProofDb};
 use strata_asm_spec::StrataAsmSpec;
 use strata_asm_worker::AsmWorkerBuilder;
+use strata_identifiers::Buf32;
 use strata_tasks::TaskExecutor;
 use tokio::{
     runtime::{Builder as RuntimeBuilder, Handle},
@@ -58,10 +60,7 @@ pub(crate) async fn bootstrap(
     // both are height-indexed and prefilled with sentinel leaves up to and
     // including `genesis_height`, so that the manifest for height `h` lands
     // at leaf index `h`. Idempotent — no-op on restart.
-    mmr_db.prefill_to(
-        genesis_height + 1,
-        strata_identifiers::Buf32::new(strata_asm_common::MMR_PREFILL_LEAF),
-    )?;
+    mmr_db.prefill_to(genesis_height + 1, Buf32::new(MMR_SENTINEL_DUMMY_LEAF))?;
 
     let worker_context = AsmWorkerContext::new(
         runtime_handle.clone(),

@@ -195,7 +195,7 @@ impl CheckpointTestHarness {
         // prefill positions are never returned to callers.
         let prefill_count = self.genesis_l1_height as u64 + 1;
         let mut manifest_mmr = <Mmr64B32 as Mmr<Sha256Hasher>>::new_repeated(
-            strata_asm_common::MMR_PREFILL_LEAF,
+            strata_asm_common::MMR_SENTINEL_DUMMY_LEAF,
             prefill_count,
         );
         let mut proof_list = Vec::with_capacity(leaves.len());

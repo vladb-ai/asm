@@ -239,7 +239,7 @@ async fn test_proven_and_external_mmr_index_alignment() {
         "final external MMR should have {prefill_count} prefill + {total_blocks_mined} real leaves"
     );
 
-    let sentinel = strata_asm_common::MMR_PREFILL_LEAF;
+    let sentinel = strata_asm_common::MMR_SENTINEL_DUMMY_LEAF;
     for (mmr_index, leaf) in external_leaves.iter().take(prefill_count).enumerate() {
         assert_eq!(
             *leaf, sentinel,

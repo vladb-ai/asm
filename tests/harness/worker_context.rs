@@ -72,7 +72,7 @@ impl TestAsmWorkerContext {
     /// mirroring the proven MMR's genesis prefill so DB-side leaf indices
     /// equal L1 block heights.
     pub fn prefill_mmr(&self, target_count: u64) {
-        let sentinel = strata_asm_common::MMR_PREFILL_LEAF;
+        let sentinel = strata_asm_common::MMR_SENTINEL_DUMMY_LEAF;
         let mut inner = self.inner.lock().unwrap();
         for _ in inner.mmr_leaves.len() as u64..target_count {
             inner.mmr_leaves.push(sentinel);
@@ -201,7 +201,7 @@ impl WorkerContext for TestAsmWorkerContext {
             (Mmr64B32::new_empty(), true)
         } else {
             let compact = <Mmr64B32 as Mmr<Sha256Hasher>>::new_repeated(
-                strata_asm_common::MMR_PREFILL_LEAF,
+                strata_asm_common::MMR_SENTINEL_DUMMY_LEAF,
                 prefill_count,
             );
             (compact, false)
@@ -211,7 +211,7 @@ impl WorkerContext for TestAsmWorkerContext {
 
         if walk_prefill_proofs {
             for i in 0..prefill_count {
-                let leaf = strata_asm_common::MMR_PREFILL_LEAF;
+                let leaf = strata_asm_common::MMR_SENTINEL_DUMMY_LEAF;
                 let proof = Mmr::<Sha256Hasher>::add_leaf_updating_proof_list(
                     &mut compact,
                     leaf,

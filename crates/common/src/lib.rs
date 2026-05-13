@@ -2,6 +2,7 @@
 //! and interacting with subprotocols in an ASM (Anchor State Machine) framework.
 
 mod aux;
+mod constants;
 mod errors;
 mod log;
 mod manifest;
@@ -25,6 +26,7 @@ mod ssz_generated {
 }
 
 pub use aux::*;
+pub use constants::*;
 pub use errors::*;
 pub use log::*;
 pub use manifest::*;
