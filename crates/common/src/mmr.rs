@@ -15,9 +15,9 @@ pub type AsmMerkleProof = strata_merkle::MerkleProofB32;
 impl AsmHistoryAccumulatorState {
     /// Creates a new height-indexed manifest MMR for the given genesis height.
     ///
-    /// The MMR is prefilled with [`MMR_PREFILL_LEAF`] for every L1 block height
-    /// up to and including `genesis_height`, so that the first appended real
-    /// manifest (for height `genesis_height + 1`) lands at MMR leaf index
+    /// The MMR is prefilled with [`MMR_SENTINEL_DUMMY_LEAF`] for every L1 block
+    /// height up to and including `genesis_height`, so that the first appended
+    /// real manifest (for height `genesis_height + 1`) lands at MMR leaf index
     /// `genesis_height + 1` — i.e. MMR leaf indices equal L1 block heights.
     pub fn new(genesis_height: u64) -> Self {
         let prefill_count = genesis_height + 1;
