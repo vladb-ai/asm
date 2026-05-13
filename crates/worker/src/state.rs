@@ -28,6 +28,11 @@ pub struct AsmWorkerServiceState<W, S: AsmSpec> {
 
     /// Current anchor block.
     pub blkid: L1BlockCommitment,
+
+    /// L1 genesis block height. The MMR is height-indexed and prefilled with
+    /// sentinels for heights `0..=genesis_height`, so this is the height just
+    /// below the first real manifest.
+    pub(crate) genesis_height: u64,
 }
 
 impl<W, S> AsmWorkerServiceState<W, S>
@@ -38,6 +43,7 @@ where
 {
     /// Creates a new service state, loading the latest anchor or creating genesis.
     pub fn new(context: W, spec: S, params: S::Params) -> WorkerResult<Self> {
+        let genesis_height = spec.genesis_l1_height(&params);
         let (anchor, blkid) = match context.get_latest_asm_state()? {
             Some((blkid, state)) => (state, blkid),
             None => {
@@ -56,7 +62,13 @@ where
             spec,
             anchor,
             blkid,
+            genesis_height,
         })
+    }
+
+    /// L1 block height of the chain genesis (anchor) block.
+    pub(crate) fn genesis_height(&self) -> u64 {
+        self.genesis_height
     }
 
     /// Returns the actual ASM STF results and the auxiliary data used during the transition.
@@ -83,11 +95,7 @@ where
             let _guard = span.enter();
 
             let accumulator = &cur_state.state().chain_view.history_accumulator;
-            let resolver = AuxDataResolver::new(
-                &self.context,
-                accumulator.genesis_height(),
-                accumulator.num_entries(),
-            );
+            let resolver = AuxDataResolver::new(&self.context, accumulator.num_entries());
             resolver.resolve(&pre_process.aux_requests)?
         };
 

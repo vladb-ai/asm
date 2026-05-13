@@ -18,7 +18,7 @@ use strata_asm_proto_checkpoint_types::{
 };
 use strata_crypto::hash;
 use strata_identifiers::{OLBlockCommitment, OLBlockId};
-use strata_merkle::{Mmr, Mmr64B32, MmrState, Sha256Hasher};
+use strata_merkle::{Mmr, Mmr64B32, Sha256Hasher};
 use strata_predicate::{PredicateKey, PredicateTypeId};
 use strata_test_utils_arb::ArbitraryGenerator;
 use strata_test_utils_btc as _;
@@ -186,22 +186,33 @@ impl CheckpointTestHarness {
     /// from genesis to the new tip, including Merkle proofs for each manifest hash.
     pub fn gen_verified_aux(&self, new_tip: &CheckpointTip) -> VerifiedAuxData {
         let leaves = self.gen_manifest_leaves(new_tip);
-        let mut proof_list = Vec::new();
 
-        let mut manifest_mmr = Mmr64B32::new_empty();
+        // The proven MMR is height-indexed: positions `0..=genesis_l1_height`
+        // are prefilled with `MMR_PREFILL_LEAF` so appended manifest leaves
+        // land at their L1-height index. We materialise the prefill on a
+        // parallel `manifest_mmr` via `new_repeated` (O(log N)) and only track
+        // proofs for the real leaves we actually append after — proofs for
+        // prefill positions are never returned to callers.
+        let prefill_count = self.genesis_l1_height as u64 + 1;
+        let mut manifest_mmr = <Mmr64B32 as Mmr<Sha256Hasher>>::new_repeated(
+            strata_asm_common::MMR_SENTINEL_DUMMY_LEAF,
+            prefill_count,
+        );
+        let mut proof_list = Vec::with_capacity(leaves.len());
+
         let mut asm_accumulator_state =
             AsmHistoryAccumulatorState::new(self.genesis_l1_height as u64);
 
         for leaf in &leaves {
             asm_accumulator_state.add_manifest_leaf(*leaf).unwrap();
 
-            let proof1 = Mmr::<Sha256Hasher>::add_leaf_updating_proof_list(
+            let proof = Mmr::<Sha256Hasher>::add_leaf_updating_proof_list(
                 &mut manifest_mmr,
                 *leaf.as_ref(),
                 &mut proof_list,
             )
             .unwrap();
-            proof_list.push(proof1);
+            proof_list.push(proof);
         }
 
         let manifest_hashes = leaves

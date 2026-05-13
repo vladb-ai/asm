@@ -18,6 +18,28 @@ use strata_identifiers::{Buf32, Hash, L1BlockCommitment, L1BlockId};
 use strata_merkle::{MerkleProofB32, Mmr, Mmr64B32, MmrState, Sha256Hasher};
 use tokio::{runtime::Handle, task::block_in_place};
 
+/// Shared mutable state for the test worker context.
+///
+/// Consolidating these fields lets us hold a single `Arc<Mutex<_>>` instead of
+/// one per field, and keeps related invariants (mmr leaves + prefill count,
+/// manifests in insertion order) close together.
+#[derive(Debug, Default)]
+pub struct TestWorkerStateInner {
+    /// Block cache (optional - fetches from client if not cached)
+    pub block_cache: HashMap<L1BlockId, Block>,
+    /// ASM states indexed by L1 block commitment
+    pub asm_states: HashMap<L1BlockCommitment, AsmState>,
+    /// Latest ASM state
+    pub latest_asm_state: Option<(L1BlockCommitment, AsmState)>,
+    /// In-memory MMR leaves in insertion order.
+    pub mmr_leaves: Vec<[u8; 32]>,
+    /// Number of leading sentinel-prefill entries in `mmr_leaves`. Indices
+    /// `0..mmr_prefill_count` are not real manifests.
+    pub mmr_prefill_count: u64,
+    /// Stored manifests in insertion order
+    pub manifests: Vec<AsmManifest>,
+}
+
 /// Test implementation of WorkerContext for integration tests
 ///
 /// Integrates with local regtest node via RPC client.
@@ -28,16 +50,8 @@ pub struct TestAsmWorkerContext {
     /// Tokio runtime handle from the test runtime, used for async operations
     /// from the worker's dedicated OS thread (which has no tokio context).
     pub tokio_handle: Handle,
-    /// Block cache (optional - fetches from client if not cached)
-    pub block_cache: Arc<Mutex<HashMap<L1BlockId, Block>>>,
-    /// ASM states indexed by L1 block commitment
-    pub asm_states: Arc<Mutex<HashMap<L1BlockCommitment, AsmState>>>,
-    /// Latest ASM state
-    pub latest_asm_state: Arc<Mutex<Option<(L1BlockCommitment, AsmState)>>>,
-    /// In-memory MMR leaves in insertion order.
-    pub mmr_leaves: Arc<Mutex<Vec<[u8; 32]>>>,
-    /// Stored manifests in insertion order
-    pub manifests: Arc<Mutex<Vec<AsmManifest>>>,
+    /// Consolidated shared mutable state.
+    pub inner: Arc<Mutex<TestWorkerStateInner>>,
 }
 
 impl TestAsmWorkerContext {
@@ -50,21 +64,30 @@ impl TestAsmWorkerContext {
         Self {
             client: Arc::new(client),
             tokio_handle: Handle::current(),
-            block_cache: Arc::new(Mutex::new(HashMap::new())),
-            asm_states: Arc::new(Mutex::new(HashMap::new())),
-            latest_asm_state: Arc::new(Mutex::new(None)),
-            mmr_leaves: Arc::new(Mutex::new(Vec::new())),
-            manifests: Arc::new(Mutex::new(Vec::new())),
+            inner: Arc::new(Mutex::new(TestWorkerStateInner::default())),
         }
+    }
+
+    /// Prefill the in-memory MMR with sentinel leaves up to `target_count`,
+    /// mirroring the proven MMR's genesis prefill so DB-side leaf indices
+    /// equal L1 block heights.
+    pub fn prefill_mmr(&self, target_count: u64) {
+        let sentinel = strata_asm_common::MMR_SENTINEL_DUMMY_LEAF;
+        let mut inner = self.inner.lock().unwrap();
+        for _ in inner.mmr_leaves.len() as u64..target_count {
+            inner.mmr_leaves.push(sentinel);
+        }
+        inner.mmr_prefill_count = target_count.max(inner.mmr_prefill_count);
     }
 
     /// Fetch a block from regtest by hash, caching it for future use
     pub async fn fetch_and_cache_block(&self, block_hash: BlockHash) -> anyhow::Result<Block> {
         let block = self.client.get_block(&block_hash).await?;
         let block_id = block_hash.to_l1_block_id();
-        self.block_cache
+        self.inner
             .lock()
             .unwrap()
+            .block_cache
             .insert(block_id, block.clone());
         Ok(block)
     }
@@ -73,7 +96,7 @@ impl TestAsmWorkerContext {
 impl WorkerContext for TestAsmWorkerContext {
     fn get_l1_block(&self, blockid: &L1BlockId) -> WorkerResult<Block> {
         // Try cache first
-        if let Some(block) = self.block_cache.lock().unwrap().get(blockid).cloned() {
+        if let Some(block) = self.inner.lock().unwrap().block_cache.get(blockid).cloned() {
             return Ok(block);
         }
 
@@ -94,25 +117,27 @@ impl WorkerContext for TestAsmWorkerContext {
         .map_err(|_| WorkerError::MissingL1Block(*blockid))?;
 
         // Cache for future use
-        self.block_cache
+        self.inner
             .lock()
             .unwrap()
+            .block_cache
             .insert(*blockid, block.clone());
 
         Ok(block)
     }
 
     fn get_anchor_state(&self, blockid: &L1BlockCommitment) -> WorkerResult<AsmState> {
-        self.asm_states
+        self.inner
             .lock()
             .unwrap()
+            .asm_states
             .get(blockid)
             .cloned()
             .ok_or(WorkerError::MissingAsmState(*blockid.blkid()))
     }
 
     fn get_latest_asm_state(&self) -> WorkerResult<Option<(L1BlockCommitment, AsmState)>> {
-        Ok(self.latest_asm_state.lock().unwrap().clone())
+        Ok(self.inner.lock().unwrap().latest_asm_state.clone())
     }
 
     fn store_anchor_state(
@@ -120,11 +145,9 @@ impl WorkerContext for TestAsmWorkerContext {
         blockid: &L1BlockCommitment,
         state: &AsmState,
     ) -> WorkerResult<()> {
-        self.asm_states
-            .lock()
-            .unwrap()
-            .insert(*blockid, state.clone());
-        *self.latest_asm_state.lock().unwrap() = Some((*blockid, state.clone()));
+        let mut inner = self.inner.lock().unwrap();
+        inner.asm_states.insert(*blockid, state.clone());
+        inner.latest_asm_state = Some((*blockid, state.clone()));
         Ok(())
     }
 
@@ -150,9 +173,9 @@ impl WorkerContext for TestAsmWorkerContext {
 
     fn append_manifest_to_mmr(&self, manifest_hash: Hash) -> WorkerResult<u64> {
         let hash_bytes: [u8; 32] = *manifest_hash.as_ref();
-        let mut leaves = self.mmr_leaves.lock().unwrap();
-        let leaf_index = leaves.len() as u64;
-        leaves.push(hash_bytes);
+        let mut inner = self.inner.lock().unwrap();
+        let leaf_index = inner.mmr_leaves.len() as u64;
+        inner.mmr_leaves.push(hash_bytes);
         Ok(leaf_index)
     }
 
@@ -161,42 +184,81 @@ impl WorkerContext for TestAsmWorkerContext {
         index: u64,
         at_leaf_count: u64,
     ) -> WorkerResult<strata_merkle::MerkleProofB32> {
-        let leaves = self.mmr_leaves.lock().unwrap();
-        if index >= at_leaf_count || at_leaf_count > leaves.len() as u64 {
+        let inner = self.inner.lock().unwrap();
+        if index >= at_leaf_count || at_leaf_count > inner.mmr_leaves.len() as u64 {
             return Err(WorkerError::MmrProofFailed { index });
         }
 
-        let mut compact = Mmr64B32::new_empty();
-        let at_leaf_count = at_leaf_count as usize;
-        let mut proof_list = Vec::with_capacity(at_leaf_count);
-        for leaf in leaves.iter().take(at_leaf_count) {
+        // The MMR is height-indexed: positions `0..prefill_count` hold the
+        // sentinel `MMR_PREFILL_LEAF`. Materialise the prefilled compact MMR
+        // in O(log N) via `new_repeated`, then iterate only over real leaves
+        // and track a single proof — the one for `index` — through subsequent
+        // appends. We can't pre-populate proofs for prefill positions because
+        // `new_repeated` doesn't expose per-leaf proofs; if `index` happens to
+        // fall in the prefill range we walk the prefill manually instead.
+        let prefill_count = inner.mmr_prefill_count.min(at_leaf_count);
+        let (mut compact, walk_prefill_proofs) = if index < prefill_count {
+            (Mmr64B32::new_empty(), true)
+        } else {
+            let compact = <Mmr64B32 as Mmr<Sha256Hasher>>::new_repeated(
+                strata_asm_common::MMR_SENTINEL_DUMMY_LEAF,
+                prefill_count,
+            );
+            (compact, false)
+        };
+
+        let mut proof_list: Vec<strata_merkle::MerkleProof<[u8; 32]>> = Vec::new();
+
+        if walk_prefill_proofs {
+            for i in 0..prefill_count {
+                let leaf = strata_asm_common::MMR_SENTINEL_DUMMY_LEAF;
+                let proof = Mmr::<Sha256Hasher>::add_leaf_updating_proof_list(
+                    &mut compact,
+                    leaf,
+                    &mut proof_list,
+                )
+                .map_err(|_| WorkerError::MmrProofFailed { index })?;
+                if i == index {
+                    proof_list.push(proof);
+                }
+            }
+        }
+
+        for cur in prefill_count..at_leaf_count {
+            let leaf = inner.mmr_leaves[cur as usize];
             let proof = Mmr::<Sha256Hasher>::add_leaf_updating_proof_list(
                 &mut compact,
-                *leaf,
+                leaf,
                 &mut proof_list,
             )
             .map_err(|_| WorkerError::MmrProofFailed { index })?;
-            proof_list.push(proof);
+            if cur == index {
+                proof_list.push(proof);
+            }
         }
 
+        // `proof_list` holds exactly one tracked proof — the one for `index` —
+        // and `add_leaf_updating_proof_list` keeps it current through every
+        // append performed after we inserted it.
         proof_list
-            .get(index as usize)
+            .first()
             .map(MerkleProofB32::from_generic)
             .ok_or(WorkerError::MmrProofFailed { index })
     }
 
     fn get_manifest_hash(&self, index: u64) -> WorkerResult<Option<Hash>> {
         Ok(self
-            .mmr_leaves
+            .inner
             .lock()
             .unwrap()
+            .mmr_leaves
             .get(index as usize)
             .copied()
             .map(Buf32::from))
     }
 
     fn store_l1_manifest(&self, manifest: AsmManifest) -> WorkerResult<()> {
-        self.manifests.lock().unwrap().push(manifest);
+        self.inner.lock().unwrap().manifests.push(manifest);
         Ok(())
     }
 
@@ -217,9 +279,10 @@ impl WorkerContext for TestAsmWorkerContext {
 
     fn has_l1_manifest(&self, blockid: &L1BlockId) -> WorkerResult<bool> {
         Ok(self
-            .manifests
+            .inner
             .lock()
             .unwrap()
+            .manifests
             .iter()
             .any(|m| m.blkid() == blockid))
     }

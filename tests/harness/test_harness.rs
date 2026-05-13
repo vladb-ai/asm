@@ -231,7 +231,7 @@ impl AsmTestHarness {
 
     /// Get the number of MMR leaves (manifest hashes) stored.
     pub fn get_mmr_leaf_count(&self) -> usize {
-        self.context.mmr_leaves.lock().unwrap().len()
+        self.context.inner.lock().unwrap().mmr_leaves.len()
     }
 
     /// Get a manifest hash by leaf index.
@@ -241,12 +241,12 @@ impl AsmTestHarness {
 
     /// Get a snapshot of all stored manifests.
     pub fn get_stored_manifests(&self) -> Vec<strata_asm_manifest_types::AsmManifest> {
-        self.context.manifests.lock().unwrap().clone()
+        self.context.inner.lock().unwrap().manifests.clone()
     }
 
     /// Get all MMR leaf hashes in leaf-index order.
     pub fn get_mmr_leaves(&self) -> Vec<[u8; 32]> {
-        self.context.mmr_leaves.lock().unwrap().clone()
+        self.context.inner.lock().unwrap().mmr_leaves.clone()
     }
 
     // Funding & Wallet
@@ -578,8 +578,12 @@ impl AsmTestHarnessBuilder {
 
         let asm_params = Arc::new(asm_params);
 
-        // 5. Create worker context
+        // 5. Create worker context. The MMR is height-indexed: prefill it with
+        // sentinel leaves for L1 heights `0..=genesis_height`, matching the
+        // proven (in-state) MMR's genesis prefill so external leaf indices
+        // equal L1 block heights.
         let context = TestAsmWorkerContext::new((*client).clone());
+        context.prefill_mmr(genesis_height + 1);
 
         // 6. Create task executor
         let task_manager = TaskManager::new(Handle::current());

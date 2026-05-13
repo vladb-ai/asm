@@ -1,9 +1,9 @@
 //! History accumulator for ASM.
 
 use strata_asm_manifest_types::{AsmManifest, AsmManifestHash};
-use strata_merkle::{MerkleError, Mmr, Mmr64B32, MmrState, Sha256Hasher};
+use strata_merkle::{MerkleError, Mmr, Mmr64B32, Sha256Hasher};
 
-use crate::AsmHistoryAccumulatorState;
+use crate::{AsmHistoryAccumulatorState, MMR_SENTINEL_DUMMY_LEAF};
 
 /// The hasher used for ASM manifest MMR operations.
 ///
@@ -13,25 +13,17 @@ pub type AsmHasher = Sha256Hasher;
 pub type AsmMerkleProof = strata_merkle::MerkleProofB32;
 
 impl AsmHistoryAccumulatorState {
-    /// Creates a new compact MMR for the given genesis height.
+    /// Creates a new height-indexed manifest MMR for the given genesis height.
     ///
-    /// The internal `offset` is set to `genesis_height + 1` since manifests
-    /// start from the first block after genesis.
+    /// The MMR is prefilled with [`MMR_SENTINEL_DUMMY_LEAF`] for every L1 block
+    /// height up to and including `genesis_height`, so that the first appended
+    /// real manifest (for height `genesis_height + 1`) lands at MMR leaf index
+    /// `genesis_height + 1` — i.e. MMR leaf indices equal L1 block heights.
     pub fn new(genesis_height: u64) -> Self {
-        let manifest_mmr = Mmr64B32::new_empty();
-        Self {
-            manifest_mmr,
-            offset: genesis_height + 1,
-        }
-    }
-
-    /// Returns the height offset for MMR index-to-height conversion.
-    pub fn offset(&self) -> u64 {
-        self.offset
-    }
-
-    pub fn genesis_height(&self) -> u64 {
-        self.offset - 1
+        let prefill_count = genesis_height + 1;
+        let manifest_mmr =
+            <Mmr64B32 as Mmr<AsmHasher>>::new_repeated(MMR_SENTINEL_DUMMY_LEAF, prefill_count);
+        Self { manifest_mmr }
     }
 
     /// Returns the current number of leaves in the manifest MMR.
@@ -41,10 +33,11 @@ impl AsmHistoryAccumulatorState {
 
     /// Returns the L1 block height of the last manifest inserted into the MMR.
     ///
-    /// Returns the genesis height if the MMR is empty.
+    /// Because the MMR is height-indexed via sentinel prefill, this is simply
+    /// `num_entries() - 1`. Returns `genesis_height` if no real manifests have
+    /// been appended yet (in that case all entries are prefill sentinels).
     pub fn last_inserted_height(&self) -> u64 {
-        // offset + num_entries - 1 because num_entries() is the count but MMR indices start at 0
-        self.offset + self.manifest_mmr.num_entries() - 1
+        self.manifest_mmr.num_entries() - 1
     }
 
     /// Verifies a Merkle proof for a leaf in the MMR.

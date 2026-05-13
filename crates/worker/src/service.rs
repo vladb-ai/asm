@@ -78,12 +78,7 @@ where
     let ctx = &state.context;
 
     // Handle pre-genesis: if the block is before genesis we don't care about it.
-    let genesis_height = state
-        .anchor
-        .state()
-        .chain_view
-        .history_accumulator
-        .genesis_height();
+    let genesis_height = state.genesis_height();
     let height = incoming_block.height();
     if height < genesis_height as u32 {
         warn!(height, "ignoring unexpected L1 block before genesis");
@@ -134,9 +129,12 @@ where
     // Special handling for genesis block - its anchor state was created during init
     // but its manifest wasn't (because Bitcoin block wasn't available yet).
     // We only store the manifest to L1 (for data consumers) but do NOT append it
-    // to the external MMR, since the internal compact MMR in AnchorState starts
-    // empty with offset = genesis_height + 1. Appending genesis here would shift
-    // all external MMR indices by 1 relative to the internal accumulator.
+    // to the external MMR. The internal compact MMR in AnchorState is
+    // height-indexed: positions `0..=genesis_height` are prefilled with
+    // sentinel leaves so that the first appended manifest (the block at
+    // `genesis_height + 1`) lands at MMR leaf index `genesis_height + 1`.
+    // Appending the genesis manifest would consume that slot and shift every
+    // subsequent leaf one position past its L1 height.
     // Idempotency: skip if the genesis manifest already exists in the L1 database.
     if pivot_block.height() as u64 == genesis_height && !ctx.has_l1_manifest(pivot_block.blkid())? {
         let genesis_span = info_span!("asm.genesis_manifest",
