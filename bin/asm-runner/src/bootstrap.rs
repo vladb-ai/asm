@@ -65,6 +65,7 @@ pub(crate) async fn bootstrap(
     let worker_context = AsmWorkerContext::new(
         runtime_handle.clone(),
         bitcoin_client.clone(),
+        &config.bitcoin.retry_config,
         state_db.clone(),
         mmr_db.clone(),
         export_entries_for_worker,
@@ -175,14 +176,19 @@ pub(crate) async fn bootstrap(
     Ok(())
 }
 
-/// Connect to Bitcoin node
+/// Connect to Bitcoin node.
+///
+/// All three `Option` parameters are passed as `None` so
+/// `bitcoind-async-client` applies its own defaults for `max_retries`,
+/// `retry_interval`, and `timeout`. See [`BitcoinConfig::retry_config`]
+/// for how this inner layer composes with the outer retry wrapper.
 async fn connect_bitcoin(config: &BitcoinConfig) -> Result<Client> {
     let client = Client::new(
         config.rpc_url.clone(),
         Auth::UserPass(config.rpc_user.clone(), config.rpc_password.clone()),
-        None, // timeout
-        config.retry_count,
-        config.retry_interval.map(|d| d.as_millis() as u64),
+        None,
+        None,
+        None,
     )?;
 
     Ok(client)
