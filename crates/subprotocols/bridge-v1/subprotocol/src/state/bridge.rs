@@ -1,7 +1,10 @@
+use bitcoin_bosd::Descriptor;
 use ssz_derive::{Decode, Encode};
 use strata_asm_params::BridgeV1InitConfig;
 use strata_asm_proto_bridge_v1_txs::{deposit::DepositInfo, errors::Mismatch};
-use strata_asm_proto_bridge_v1_types::{OperatorIdx, WithdrawOutput, WithdrawalCommand};
+use strata_asm_proto_bridge_v1_types::{
+    OperatorIdx, SafeHarbour, WithdrawOutput, WithdrawalCommand,
+};
 use strata_btc_types::BitcoinAmount;
 use strata_identifiers::L1BlockCommitment;
 
@@ -38,6 +41,9 @@ pub struct BridgeV1State {
     /// Number of blocks after Deposit Request Transaction that the depositor can reclaim
     /// funds if operators fail to process the deposit.
     recovery_delay: u16,
+
+    /// Safe harbour
+    safe_harbour: SafeHarbour,
 }
 
 impl BridgeV1State {
@@ -64,6 +70,7 @@ impl BridgeV1State {
             denomination: config.denomination,
             operator_fee: config.operator_fee,
             recovery_delay: config.recovery_delay,
+            safe_harbour: SafeHarbour::new(config.safe_harbour_address.clone()),
         }
     }
 
@@ -90,6 +97,21 @@ impl BridgeV1State {
     /// Returns the recovery delay to reclaim funds.
     pub fn recovery_delay(&self) -> u16 {
         self.recovery_delay
+    }
+
+    /// Returns a reference to the safe harbour.
+    pub fn safe_harbour(&self) -> &SafeHarbour {
+        &self.safe_harbour
+    }
+
+    /// Sets the safe harbour activation flag.
+    pub fn set_safe_harbour_activated(&mut self, activated: bool) {
+        self.safe_harbour.set_activated(activated);
+    }
+
+    /// Sets the safe harbour activation flag.
+    pub fn update_safe_harbour_address(&mut self, new_address: Descriptor) {
+        self.safe_harbour.update_address(new_address);
     }
 
     /// Processes a deposit transaction by validating and adding it to the deposits table.

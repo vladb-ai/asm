@@ -6,6 +6,7 @@
 
 use std::any::Any;
 
+use bitcoin_bosd::Descriptor;
 use ssz_derive::{Decode, Encode};
 use strata_asm_common::{InterprotoMsg, SubprotocolId};
 use strata_asm_proto_bridge_v1_txs::BRIDGE_V1_SUBPROTOCOL_ID;
@@ -26,6 +27,18 @@ pub enum BridgeIncomingMsg {
     /// Emitted by the admin subprotocol when the operator set is updated.
     /// Adds new operators by public key and removes existing operators by index.
     UpdateOperatorSet(UpdateOperatorSetPayload),
+
+    /// Emitted by the admin subprotocol to update the safe harbour destination
+    /// descriptor.
+    UpdateSafeHarbourAddress(Descriptor),
+
+    /// Defcon1 signal raised by the admin subprotocol. The bridge must respond by
+    /// activating the safe harbour.
+    Defcon1(Defcon1Payload),
+
+    /// Defcon3 signal raised by the admin subprotocol. The bridge must respond by
+    /// activating the safe harbour.
+    Defcon3(Defcon3Payload),
 }
 
 /// Payload for [`BridgeIncomingMsg::UpdateOperatorSet`].
@@ -36,6 +49,14 @@ pub struct UpdateOperatorSetPayload {
     /// Operator indices to remove from the bridge multisig.
     pub remove_members: Vec<OperatorIdx>,
 }
+
+/// Empty marker payload for [`BridgeIncomingMsg::Defcon1`]; the signal itself carries no data.
+#[derive(Clone, Debug, Eq, PartialEq, Default, Encode, Decode)]
+pub struct Defcon1Payload {}
+
+/// Empty marker payload for [`BridgeIncomingMsg::Defcon3`]; the signal itself carries no data.
+#[derive(Clone, Debug, Eq, PartialEq, Default, Encode, Decode)]
+pub struct Defcon3Payload {}
 
 impl InterprotoMsg for BridgeIncomingMsg {
     fn id(&self) -> SubprotocolId {

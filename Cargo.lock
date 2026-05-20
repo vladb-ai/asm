@@ -7874,6 +7874,7 @@ version = "0.1.0"
 dependencies = [
  "arbitrary",
  "bitcoin",
+ "bitcoin-bosd 0.10.0",
  "proptest",
  "serde",
  "serde_json",
@@ -8017,6 +8018,7 @@ dependencies = [
 name = "strata-asm-proto-bridge-v1-msgs"
 version = "0.1.0"
 dependencies = [
+ "bitcoin-bosd 0.10.0",
  "ssz",
  "ssz_derive",
  "strata-asm-common",
@@ -8055,6 +8057,7 @@ dependencies = [
  "bitvec",
  "borsh",
  "serde",
+ "serde_json",
  "ssz",
  "ssz_derive",
  "strata-btc-types",
@@ -8188,6 +8191,7 @@ dependencies = [
  "jsonrpsee",
  "strata-asm-proof-types",
  "strata-asm-proto-bridge-v1",
+ "strata-asm-proto-bridge-v1-types",
  "strata-asm-proto-checkpoint-types",
  "strata-asm-worker",
 ]
@@ -8227,6 +8231,7 @@ dependencies = [
  "strata-asm-proof-types",
  "strata-asm-proto-bridge-v1",
  "strata-asm-proto-bridge-v1-txs",
+ "strata-asm-proto-bridge-v1-types",
  "strata-asm-proto-checkpoint",
  "strata-asm-proto-checkpoint-txs",
  "strata-asm-proto-checkpoint-types",
