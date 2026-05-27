@@ -1,34 +1,46 @@
 # warning: run from repo root, NOT inside this dir
 #
-# Builds strata-asm-runner with default features. The runner supports three
-# prover modes selected by config (see docker/README.md):
+# Builds strata-asm-runner. The runner supports three prover modes selected by
+# config (see docker/README.md):
 #   - none:   `[orchestrator]` omitted entirely
 #   - native: `orchestrator.backend.kind = "native"`
-#   - sp1:    `orchestrator.backend.kind = "sp1"`  (NOT supported by this image)
+#   - sp1:    `orchestrator.backend.kind = "sp1"`
 #
-# TODO(prover-sp1): build an SP1-capable image. The native prover already works
-# with this image because it's compiled in unconditionally; SP1 mode requires:
-#   1. Swap this builder for an image with the SP1 toolchain (e.g.
-#      `FROM ghcr.io/succinctlabs/sp1:...`) so `cargo +succinct` is available.
-#   2. Drop `SP1_SKIP_PROGRAM_BUILD=true` and build the guest ELFs via
-#      `cargo b -r -p strata-asm-sp1-guest-builder` so `guest-builder/sp1/elfs/{asm,moho}.elf`
-#      get produced.
-#   3. Build the runner with `--features sp1`.
-#   4. Copy the guest ELFs into the runtime image and point
-#      `orchestrator.backend.sp1.{asm,moho}_elf_path` at them from config.toml.
-# Plumb this through as a separate Dockerfile or behind a build-arg once the
-# native flow is settled.
+# Two image variants are produced from a single Dockerfile via `--target`:
+#   - `native` (default): runner built without SP1; only the `none` and
+#     `native` prover modes work.
+#   - `sp1`: runner built with `--features sp1`; the SP1 guest ELFs
+#     (`asm.elf`, `moho.elf`) must be staged at
+#     `docker/asm-runner/artifacts/elfs/` in the build context — they are
+#     compiled outside docker (host or CI runner with `sp1up`), matching the
+#     pattern alpen uses for its strata image. The image build itself does
+#     NOT install the SP1 toolchain.
+#
+# Examples:
+#   docker build -f docker/asm-runner/Dockerfile -t strata-asm-runner:native .
+#
+#   cargo b -r -p strata-asm-sp1-guest-builder
+#   mkdir -p docker/asm-runner/artifacts/elfs
+#   cp guest-builder/sp1/elfs/{asm,moho}.elf docker/asm-runner/artifacts/elfs/
+#   docker build -f docker/asm-runner/Dockerfile \
+#     --target sp1 --build-arg CARGO_FEATURES=sp1 \
+#     -t strata-asm-runner:sp1 .
 FROM --platform=linux/amd64 ubuntu:24.04 AS builder
 
 WORKDIR /app
+
+# Optional comma-separated cargo features (e.g. "sp1"). Applied to the runner
+# build below.
+ARG CARGO_FEATURES=""
 
 ENV CARGO_INCREMENTAL=0
 ENV CARGO_TERM_COLOR=always
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH=/root/.cargo/bin:$PATH
-# strata-asm-runner's default features don't pull SP1 in, but the guest-builder
-# crate's build.rs still gets compiled as part of the workspace metadata pass —
-# skip the actual guest compilation so we don't need the SP1 toolchain here.
+# The guest-builder crate's build.rs gets compiled as part of the workspace
+# metadata pass even when building `-p strata-asm-runner`. Guest ELFs are
+# always supplied externally (see sp1 target below), so skip the in-build
+# guest compilation — otherwise the build would need the SP1 toolchain.
 ENV SP1_SKIP_PROGRAM_BUILD=true
 
 RUN apt-get update && \
@@ -58,10 +70,11 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo b -r -p strata-asm-runner && \
+    cargo b -r -p strata-asm-runner \
+      ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} && \
     cp /app/target/release/strata-asm-runner /usr/local/bin/strata-asm-runner
 
-FROM --platform=linux/amd64 ubuntu:24.04 AS runtime
+FROM --platform=linux/amd64 ubuntu:24.04 AS runtime-base
 
 WORKDIR /app
 
@@ -78,3 +91,14 @@ COPY --from=builder /usr/local/bin/strata-asm-runner /usr/local/bin/strata-asm-r
 
 ENTRYPOINT ["/usr/local/bin/strata-asm-runner"]
 CMD ["--config", "/app/config.toml", "--params", "/app/asm-params.json"]
+
+# SP1 variant: adds the pre-built guest ELFs. Point
+# `orchestrator.backend.sp1.{asm,moho}_elf_path` at /app/elfs/{asm,moho}.elf
+# from config.toml.
+FROM runtime-base AS sp1
+COPY docker/asm-runner/artifacts/elfs/asm.elf /app/elfs/asm.elf
+COPY docker/asm-runner/artifacts/elfs/moho.elf /app/elfs/moho.elf
+
+# Default target: native-only runtime. Listed last so plain `docker build`
+# (without `--target`) produces the non-SP1 image.
+FROM runtime-base AS native
