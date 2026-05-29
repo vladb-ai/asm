@@ -75,8 +75,10 @@ impl AssignmentEntry {
     /// Creates a new assignment entry by randomly selecting an eligible operator.
     ///
     /// Performs deterministic random selection of an operator from the deposit's notary set,
-    /// filtering by currently active operators. Uses the provided L1 block ID as a seed
-    /// for reproducible operator assignment across nodes.
+    /// filtering by currently active operators. The RNG is keyed by `(L1BlockId, deposit_idx)`
+    /// — the L1 block id seeds `ChaChaRng` and the deposit index sets the ChaCha20 stream id —
+    /// so multiple assignments created in the same block draw from independent streams
+    /// instead of collapsing onto a single operator.
     ///
     /// # Parameters
     ///
@@ -123,9 +125,11 @@ impl AssignmentEntry {
         {
             idx
         } else {
-            // Use ChaChaRng with L1 block ID as seed for deterministic random selection.
+            // Seed with the L1 block id and stream-separate by deposit index so concurrent
+            // assignments in the same block draw from independent ChaCha20 streams.
             let seed_bytes: [u8; 32] = Buf32::from(seed).into();
             let mut rng = ChaChaRng::from_seed(seed_bytes);
+            rng.set_stream(deposit_entry.idx() as u64);
             let random_index = (rng.next_u32() as usize) % active_count;
             eligible_operators
                 .active_indices()
@@ -190,9 +194,11 @@ impl AssignmentEntry {
             .try_set(self.current_assignee, true)
             .map_err(WithdrawalAssignmentError::BitmapError)?;
 
-        // Use ChaChaRng with L1 block ID as seed for deterministic random selection
+        // Seed with the L1 block id and stream-separate by deposit index so concurrent
+        // reassignments in the same block draw from independent ChaCha20 streams.
         let seed_bytes: [u8; 32] = Buf32::from(seed).into();
         let mut rng = ChaChaRng::from_seed(seed_bytes);
+        rng.set_stream(self.deposit_entry.idx() as u64);
 
         // Use the already cached bitmap from DepositEntry instead of converting from Vec
         let mut eligible_operators = filter_eligible_operators(
@@ -873,6 +879,68 @@ mod tests {
         assert_eq!(
             future_assignment_after.current_assignee(),
             future_original_assignee
+        );
+    }
+
+    /// Reassigning many expired assignments in one block distributes them across the
+    /// eligible operator set rather than funneling onto a single operator.
+    #[test]
+    fn test_reassign_expired_assignments_spread_across_operators() {
+        use std::collections::HashSet;
+
+        let mut table = AssignmentTable::new(100);
+        let mut arb = ArbitraryGenerator::new();
+
+        let current_height: L1Height = 150;
+        let initial_seed: L1BlockId = arb.generate();
+        let reassign_seed: L1BlockId = arb.generate();
+        let l1_block = L1BlockCommitment::new(current_height, reassign_seed);
+
+        // Ten active operators shared by every deposit so all assignments draw from the
+        // same eligible pool. With 10 entries reassigned independently over 10 operators,
+        // the probability of all draws colliding on a single operator is ~10^-9 — well
+        // below any practical flakiness threshold while keeping the test seed-agnostic.
+        let current_active_operators = OperatorBitmap::new_with_size(10, true);
+
+        let expired_deadline: L1Height = 100;
+        let num_assignments = 10u32;
+        let mut deposit_indices = Vec::new();
+
+        for idx in 0..num_assignments {
+            let arb_entry: DepositEntry = arb.generate();
+            let deposit_entry =
+                DepositEntry::new(idx, current_active_operators.clone(), arb_entry.amt()).unwrap();
+
+            let withdrawal_cmd: WithdrawalCommand = arb.generate();
+            let assignment = AssignmentEntry::create_with_random_assignment(
+                deposit_entry,
+                withdrawal_cmd,
+                expired_deadline,
+                &current_active_operators,
+                initial_seed,
+                OperatorSelection::any(),
+            )
+            .unwrap();
+
+            deposit_indices.push(assignment.deposit_idx());
+            table.insert(assignment);
+        }
+
+        let reassigned = table
+            .reassign_expired_assignments(&current_active_operators, &l1_block)
+            .unwrap();
+        assert_eq!(reassigned.len(), num_assignments as usize);
+
+        let assignees: Vec<OperatorIdx> = deposit_indices
+            .iter()
+            .map(|idx| table.get_assignment(*idx).unwrap().current_assignee())
+            .collect();
+
+        let unique: HashSet<OperatorIdx> = assignees.iter().copied().collect();
+        assert!(
+            unique.len() > 1,
+            "expected reassigned operators to spread across multiple choices, got {:?}",
+            assignees,
         );
     }
 }

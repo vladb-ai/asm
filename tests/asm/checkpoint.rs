@@ -398,3 +398,71 @@ async fn test_checkpoint_rejected_when_withdrawals_exceed_deposits() {
         "verified_tip epoch should remain 0 when checkpoint is rejected"
     );
 }
+
+/// Multiple `OperatorSelection::any()` withdrawal intents carried by a single checkpoint
+/// distribute across operators rather than all funneling onto one.
+///
+/// Flow:
+/// 1. Submit 10 deposits (indices 0..=9) with a 10-operator notary set.
+/// 2. Submit a single checkpoint containing 10 withdrawal intents, each `OperatorSelection::any()`.
+/// 3. Verify 10 assignments exist and at least 2 distinct operators are represented.
+///
+/// Sizing rationale: 10 intents × 10 operators puts the probability of all draws
+/// colliding on a single operator at ~10^-9, so the test stays seed-agnostic without
+/// being flaky.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_intents_in_one_checkpoint_spread_across_operators() {
+    use std::collections::HashSet;
+
+    let genesis_l1_height = AsmTestHarnessBuilder::DEFAULT_GENESIS_HEIGHT as u32;
+    let num_operators = 10;
+    let (bridge_params, ctx) = create_test_bridge_setup(num_operators);
+    let (checkpoint_params, mut checkpoint_harness) =
+        create_test_checkpoint_setup(genesis_l1_height);
+    let denomination = ctx.denomination();
+
+    let harness = AsmTestHarnessBuilder::default()
+        .with_bridge_config(bridge_params)
+        .with_checkpoint_config(checkpoint_params)
+        .with_txindex()
+        .build()
+        .await
+        .unwrap();
+
+    harness.mine_block(None).await.unwrap();
+
+    let num_deposits = 10u32;
+    for i in 0..num_deposits {
+        harness.submit_deposit(&ctx, i).await.unwrap();
+    }
+    harness.mine_block(None).await.unwrap();
+
+    // One checkpoint, ten intents, each picking "any" operator.
+    let intents: Vec<(u64, OperatorSelection)> = (0..num_deposits)
+        .map(|_| (denomination.to_sat(), OperatorSelection::any()))
+        .collect();
+    harness
+        .submit_checkpoint_with_withdrawal_intents(&mut checkpoint_harness, &intents)
+        .await
+        .unwrap();
+
+    let bridge_state = harness.bridge_state().unwrap();
+    assert_eq!(
+        bridge_state.assignments().len(),
+        num_deposits,
+        "every intent should produce an assignment"
+    );
+
+    let assignees: Vec<_> = bridge_state
+        .assignments()
+        .assignments()
+        .iter()
+        .map(|a| a.current_assignee())
+        .collect();
+    let unique: HashSet<_> = assignees.iter().copied().collect();
+    assert!(
+        unique.len() > 1,
+        "expected intents in one checkpoint to spread across multiple operators, got {:?}",
+        assignees,
+    );
+}
