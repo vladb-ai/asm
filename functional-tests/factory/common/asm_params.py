@@ -37,11 +37,14 @@ class ConfirmationDepths:
     strata_admin_multisig_update: int
     strata_seq_manager_multisig_update: int
     alpen_admin_multisig_update: int
+    strata_security_council_multisig_update: int
     operator_update: int
     sequencer_update: int
     ol_stf_vk_update: int
     asm_stf_vk_update: int
     ee_stf_vk_update: int
+    defcon3: int
+    safe_harbour_address_update: int
 
 
 @dataclass
@@ -49,6 +52,7 @@ class AdminSubprotocol:
     alpen_administrator: ThresholdConfig
     strata_administrator: ThresholdConfig
     strata_sequencer_manager: ThresholdConfig
+    strata_security_council: ThresholdConfig
     confirmation_depths: ConfirmationDepths
     max_seqno_gap: int
 
@@ -126,15 +130,19 @@ def build_subprotocols(
                 alpen_administrator=ThresholdConfig(keys=compressed_keys, threshold=1),
                 strata_administrator=ThresholdConfig(keys=compressed_keys, threshold=1),
                 strata_sequencer_manager=ThresholdConfig(keys=compressed_keys, threshold=1),
+                strata_security_council=ThresholdConfig(keys=compressed_keys, threshold=1),
                 confirmation_depths=ConfirmationDepths(
                     strata_admin_multisig_update=confirmation_depth,
                     strata_seq_manager_multisig_update=confirmation_depth,
                     alpen_admin_multisig_update=confirmation_depth,
+                    strata_security_council_multisig_update=confirmation_depth,
                     operator_update=confirmation_depth,
                     sequencer_update=confirmation_depth,
                     ol_stf_vk_update=confirmation_depth,
                     asm_stf_vk_update=confirmation_depth,
                     ee_stf_vk_update=confirmation_depth,
+                    defcon3=confirmation_depth,
+                    safe_harbour_address_update=confirmation_depth,
                 ),
                 max_seqno_gap=10,
             )

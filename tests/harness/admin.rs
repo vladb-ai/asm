@@ -30,8 +30,9 @@ use strata_asm_proto_admin::{AdministrationSubprotoState, AdministrationSubproto
 use strata_asm_proto_admin_txs::{
     actions::{
         updates::{
-            AlpenAdminMultisigUpdate, AsmStfVkUpdate, EeStfVkUpdate, OlStfVkUpdate,
-            OperatorSetUpdate, SequencerUpdate, StrataAdminMultisigUpdate,
+            AlpenAdminMultisigUpdate, AsmStfVkUpdate, Defcon1Update, Defcon3Update, EeStfVkUpdate,
+            OlStfVkUpdate, OperatorSetUpdate, SafeHarbourAddressUpdate, SequencerUpdate,
+            StrataAdminMultisigUpdate, StrataSecurityCouncilMultisigUpdate,
             StrataSeqManagerMultisigUpdate,
         },
         CancelAction, MultisigAction, UpdateAction,
@@ -39,6 +40,7 @@ use strata_asm_proto_admin_txs::{
     parser::SignedPayload,
     test_utils::create_signature_set,
 };
+use strata_asm_proto_bridge_v1_types::SafeHarbourAddress;
 use strata_crypto::{
     keys::compressed::CompressedPublicKey,
     threshold_signature::{ThresholdConfig, ThresholdConfigUpdate},
@@ -257,6 +259,9 @@ pub fn multisig_config_update(
         Role::AlpenAdministrator => {
             UpdateAction::AlpenAdminMultisig(AlpenAdminMultisigUpdate::new(config))
         }
+        Role::StrataSecurityCouncil => UpdateAction::StrataSecurityCouncilMultisig(
+            StrataSecurityCouncilMultisigUpdate::new(config),
+        ),
     };
     MultisigAction::Update(update)
 }
@@ -276,19 +281,36 @@ pub fn ee_stf_vk_update(key: PredicateKey) -> MultisigAction {
     MultisigAction::Update(UpdateAction::EeStfVk(EeStfVkUpdate::new(key)))
 }
 
+/// Create a Defcon 1 immediate sweep action.
+pub fn defcon1_update() -> MultisigAction {
+    MultisigAction::Update(UpdateAction::Defcon1(Defcon1Update))
+}
+
+/// Create a Defcon 3 delayed sweep action.
+pub fn defcon3_update() -> MultisigAction {
+    MultisigAction::Update(UpdateAction::Defcon3(Defcon3Update))
+}
+
+/// Create a safe harbour address update action.
+pub fn safe_harbour_address_update(address: SafeHarbourAddress) -> MultisigAction {
+    MultisigAction::Update(UpdateAction::SafeHarbourAddress(
+        SafeHarbourAddressUpdate::new(address),
+    ))
+}
+
 // ============================================================================
 // Test Setup
 // ============================================================================
 
 /// Creates matching admin subprotocol params and signing context.
 ///
-/// Generates a distinct 1-of-1 [`ThresholdConfig`] keypair for each of the three roles
+/// Generates a distinct 1-of-1 [`ThresholdConfig`] keypair for each of the four roles
 /// ([`Role::StrataAdministrator`], [`Role::StrataSequencerManager`],
-/// [`Role::AlpenAdministrator`]). The returned [`AdminContext`] holds the matching
-/// signing material per role, so by default `submit_admin_action(ctx, action)` signs
-/// with the action's required role's keys. Combine with
-/// [`AdminExt::submit_admin_action_as_role`] to exercise role-segregation rejection
-/// paths (e.g. signing an OL STF VK update with the AlpenAdministrator's keys).
+/// [`Role::AlpenAdministrator`], [`Role::StrataSecurityCouncil`]). The returned
+/// [`AdminContext`] holds the matching signing material per role, so by default
+/// `submit_admin_action(ctx, action)` signs with the action's required role's keys.
+/// Combine with [`AdminExt::submit_admin_action_as_role`] to exercise role-segregation
+/// rejection paths (e.g. signing an OL STF VK update with the AlpenAdministrator's keys).
 pub fn create_test_admin_setup(
     confirmation_depth: u16,
 ) -> (AdministrationInitConfig, AdminContext) {
@@ -304,20 +326,25 @@ pub fn create_test_admin_setup(
     let (strata_administrator, sk_admin) = make_role();
     let (strata_sequencer_manager, sk_seq) = make_role();
     let (alpen_administrator, sk_alpen) = make_role();
+    let (strata_security_council, sk_council) = make_role();
 
     let params = AdministrationInitConfig {
         strata_administrator,
         strata_sequencer_manager,
         alpen_administrator,
+        strata_security_council,
         confirmation_depths: ConfirmationDepths {
             strata_admin_multisig_update: confirmation_depth,
             strata_seq_manager_multisig_update: confirmation_depth,
             alpen_admin_multisig_update: confirmation_depth,
+            strata_security_council_multisig_update: confirmation_depth,
             operator_update: confirmation_depth,
             sequencer_update: confirmation_depth,
             ol_stf_vk_update: confirmation_depth,
             asm_stf_vk_update: confirmation_depth,
             ee_stf_vk_update: confirmation_depth,
+            defcon3: confirmation_depth,
+            safe_harbour_address_update: confirmation_depth,
         },
         max_seqno_gap: DEFAULT_MAX_SEQNO_GAP,
     };
@@ -326,6 +353,7 @@ pub fn create_test_admin_setup(
         (Role::StrataAdministrator, (vec![sk_admin], vec![0u8])),
         (Role::StrataSequencerManager, (vec![sk_seq], vec![0u8])),
         (Role::AlpenAdministrator, (vec![sk_alpen], vec![0u8])),
+        (Role::StrataSecurityCouncil, (vec![sk_council], vec![0u8])),
     ]);
     let ctx = AdminContext::new(role_keys);
 

@@ -7705,12 +7705,12 @@ version = "0.1.0"
 dependencies = [
  "arbitrary",
  "bitcoin",
- "bitcoin-bosd 0.11.0",
  "proptest",
  "serde",
  "serde_json",
  "ssz",
  "ssz_derive",
+ "strata-asm-proto-bridge-v1-types",
  "strata-btc-types",
  "strata-btc-verification",
  "strata-crypto",
@@ -7787,6 +7787,7 @@ dependencies = [
  "strata-asm-params",
  "strata-asm-proto-admin-txs",
  "strata-asm-proto-bridge-v1-msgs",
+ "strata-asm-proto-bridge-v1-types",
  "strata-asm-proto-checkpoint-msgs",
  "strata-crypto",
  "strata-identifiers",
@@ -7801,12 +7802,14 @@ version = "0.1.0"
 dependencies = [
  "arbitrary",
  "bitcoin",
+ "bitcoin-bosd 0.11.0",
  "hex",
  "rand 0.8.6",
  "ssz",
  "ssz_derive",
  "strata-asm-common",
  "strata-asm-params",
+ "strata-asm-proto-bridge-v1-types",
  "strata-asm-proto-txs-test-utils",
  "strata-crypto",
  "strata-identifiers",
@@ -7849,7 +7852,6 @@ dependencies = [
 name = "strata-asm-proto-bridge-v1-msgs"
 version = "0.1.0"
 dependencies = [
- "bitcoin-bosd 0.11.0",
  "ssz",
  "ssz_derive",
  "strata-asm-common",
@@ -7884,6 +7886,7 @@ name = "strata-asm-proto-bridge-v1-types"
 version = "0.1.0"
 dependencies = [
  "arbitrary",
+ "bitcoin",
  "bitcoin-bosd 0.11.0",
  "bitvec",
  "borsh",

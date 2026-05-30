@@ -22,11 +22,14 @@ pub struct ConfirmationDepths {
     pub strata_admin_multisig_update: u16,
     pub strata_seq_manager_multisig_update: u16,
     pub alpen_admin_multisig_update: u16,
+    pub strata_security_council_multisig_update: u16,
     pub operator_update: u16,
     pub sequencer_update: u16,
     pub ol_stf_vk_update: u16,
     pub asm_stf_vk_update: u16,
     pub ee_stf_vk_update: u16,
+    pub defcon3: u16,
+    pub safe_harbour_address_update: u16,
 }
 
 impl ConfirmationDepths {
@@ -37,11 +40,19 @@ impl ConfirmationDepths {
             UpdateTxType::StrataAdminMultisigUpdate => self.strata_admin_multisig_update,
             UpdateTxType::StrataSeqManagerMultisigUpdate => self.strata_seq_manager_multisig_update,
             UpdateTxType::AlpenAdminMultisigUpdate => self.alpen_admin_multisig_update,
+            UpdateTxType::StrataSecurityCouncilMultisigUpdate => {
+                self.strata_security_council_multisig_update
+            }
             UpdateTxType::OperatorUpdate => self.operator_update,
             UpdateTxType::SequencerUpdate => self.sequencer_update,
             UpdateTxType::OlStfVkUpdate => self.ol_stf_vk_update,
             UpdateTxType::AsmStfVkUpdate => self.asm_stf_vk_update,
             UpdateTxType::EeStfVkUpdate => self.ee_stf_vk_update,
+            // Defcon1 is the emergency lever — by definition it applies immediately,
+            // so there is no per-deployment knob for it.
+            UpdateTxType::Defcon1 => 0,
+            UpdateTxType::Defcon3 => self.defcon3,
+            UpdateTxType::SafeHarbourAddressUpdate => self.safe_harbour_address_update,
         };
         (depth != 0).then_some(depth)
     }

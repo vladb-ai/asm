@@ -8,7 +8,8 @@ use strata_asm_proto_admin_txs::{
     actions::{MultisigAction, UpdateAction},
     parser::SignedPayload,
 };
-use strata_asm_proto_bridge_v1_msgs::{BridgeIncomingMsg, UpdateOperatorSetPayload};
+use strata_asm_proto_bridge_v1_msgs::{BridgeIncomingMsg, DefconPayload, UpdateOperatorSetPayload};
+use strata_asm_proto_bridge_v1_types::SafeHarbourAddress;
 use strata_asm_proto_checkpoint_msgs::CheckpointIncomingMsg;
 use strata_crypto::threshold_signature::ThresholdConfigUpdate;
 use strata_identifiers::{AccountSerial, Buf32, L1Height, SYSTEM_RESERVED_ACCTS};
@@ -141,6 +142,9 @@ fn handle_update(
         UpdateAction::AlpenAdminMultisig(update) => {
             apply_multisig(state, Role::AlpenAdministrator, update.config());
         }
+        UpdateAction::StrataSecurityCouncilMultisig(update) => {
+            apply_multisig(state, Role::StrataSecurityCouncil, update.config());
+        }
         UpdateAction::OperatorSet(update) => {
             let (add_members, remove_members) = update.into_inner();
             relay_bridge_operator_set_update(relayer, add_members, remove_members);
@@ -159,6 +163,10 @@ fn handle_update(
         }
         UpdateAction::EeStfVk(update) => {
             relay_alpen_predicate_update(relayer, update.into_key());
+        }
+        UpdateAction::Defcon1(_) | UpdateAction::Defcon3(_) => relay_bridge_defcon(relayer),
+        UpdateAction::SafeHarbourAddress(update) => {
+            relay_bridge_safe_harbour_address_update(relayer, update.into_inner());
         }
     }
 }
@@ -215,6 +223,20 @@ fn relay_bridge_operator_set_update(
     info!("Forwarded operator set update to bridge subprotocol");
 }
 
+fn relay_bridge_defcon(relayer: &mut impl MsgRelayer) {
+    relayer.relay_msg(&BridgeIncomingMsg::Defcon(DefconPayload::default()));
+    info!("Forwarded Defcon signal to bridge subprotocol");
+}
+
+fn relay_bridge_safe_harbour_address_update(
+    relayer: &mut impl MsgRelayer,
+    address: SafeHarbourAddress,
+) {
+    info!(?address, "New safe harbour address");
+    relayer.relay_msg(&BridgeIncomingMsg::UpdateSafeHarbourAddress(address));
+    info!("Forwarded safe harbour address update to bridge subprotocol");
+}
+
 #[cfg(test)]
 mod tests {
     use std::{any::Any, num::NonZero};
@@ -227,11 +249,16 @@ mod tests {
     use strata_asm_proto_admin_txs::{
         actions::{
             CancelAction, MultisigAction, UpdateAction,
-            updates::{AsmStfVkUpdate, OlStfVkUpdate, SequencerUpdate},
+            updates::{
+                AsmStfVkUpdate, Defcon1Update, Defcon3Update, OlStfVkUpdate,
+                SafeHarbourAddressUpdate, SequencerUpdate,
+            },
         },
         parser::SignedPayload,
         test_utils::create_signature_set,
     };
+    use strata_asm_proto_bridge_v1_msgs::BridgeIncomingMsg;
+    use strata_asm_proto_bridge_v1_types::SafeHarbourAddress;
     use strata_asm_proto_checkpoint_msgs::CheckpointIncomingMsg;
     use strata_crypto::{
         keys::compressed::CompressedPublicKey, threshold_signature::ThresholdConfig,
@@ -281,7 +308,12 @@ mod tests {
         }
     }
 
-    fn create_test_params() -> (AdministrationInitConfig, Vec<SecretKey>, Vec<SecretKey>) {
+    fn create_test_params() -> (
+        AdministrationInitConfig,
+        Vec<SecretKey>,
+        Vec<SecretKey>,
+        Vec<SecretKey>,
+    ) {
         let secp = Secp256k1::new();
 
         let strata_admin_sks: Vec<SecretKey> = (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
@@ -309,15 +341,31 @@ mod tests {
         let alpen_administrator =
             ThresholdConfig::try_new(alpen_admin_pks, NonZero::new(2).unwrap()).unwrap();
 
+        let strata_security_council_sks: Vec<SecretKey> =
+            (0..3).map(|_| SecretKey::new(&mut OsRng)).collect();
+        let strata_security_council_pks: Vec<CompressedPublicKey> = strata_security_council_sks
+            .iter()
+            .map(|sk| CompressedPublicKey::from(PublicKey::from_secret_key(&secp, sk)))
+            .collect();
+        let strata_security_council =
+            ThresholdConfig::try_new(strata_security_council_pks, NonZero::new(2).unwrap())
+                .unwrap();
+
         let config = AdministrationInitConfig {
             strata_administrator,
             strata_sequencer_manager,
             alpen_administrator,
+            strata_security_council,
             confirmation_depths: uniform_confirmation_depths(2016),
             max_seqno_gap: 10.try_into().unwrap(),
         };
 
-        (config, strata_admin_sks, strata_seq_manager_sks)
+        (
+            config,
+            strata_admin_sks,
+            strata_seq_manager_sks,
+            strata_security_council_sks,
+        )
     }
 
     fn uniform_confirmation_depths(depth: u16) -> ConfirmationDepths {
@@ -325,12 +373,14 @@ mod tests {
             strata_admin_multisig_update: depth,
             strata_seq_manager_multisig_update: depth,
             alpen_admin_multisig_update: depth,
+            strata_security_council_multisig_update: depth,
             operator_update: depth,
-            // Sequencer updates are designed to apply immediately (depth 0 sentinel).
-            sequencer_update: 0,
+            sequencer_update: depth,
             ol_stf_vk_update: depth,
             asm_stf_vk_update: depth,
             ee_stf_vk_update: depth,
+            defcon3: depth,
+            safe_harbour_address_update: depth,
         }
     }
 
@@ -354,7 +404,7 @@ mod tests {
     /// - Queued actions can be found in state
     #[test]
     fn test_strata_administrator_update_actions() {
-        let (params, admin_sks, _) = create_test_params();
+        let (params, admin_sks, _, _) = create_test_params();
         let mut state = AdministrationSubprotoState::new(&params);
         let mut relayer = MockRelayer::<CheckpointIncomingMsg>::new();
         let current_height = 1000;
@@ -417,7 +467,7 @@ mod tests {
     /// duplicate and out-of-order sequence numbers for StrataAdministrator actions.
     #[test]
     fn test_strata_administrator_incorrect_seqno() {
-        let (params, admin_sks, _) = create_test_params();
+        let (params, admin_sks, _, _) = create_test_params();
         let mut state = AdministrationSubprotoState::new(&params);
         let mut relayer = MockRelayer::<CheckpointIncomingMsg>::new();
         let current_height = 1000;
@@ -473,7 +523,7 @@ mod tests {
     #[test]
     fn test_zero_depth_update_applies_immediately() {
         let mut arb = ArbitraryGenerator::new();
-        let (mut params, _, seq_manager_sks) = create_test_params();
+        let (mut params, _, seq_manager_sks, _) = create_test_params();
         params.confirmation_depths.sequencer_update = 0;
         let mut state = AdministrationSubprotoState::new(&params);
 
@@ -535,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_rollup_verifying_key_update_forwarded_to_checkpoint() {
-        let (params, _, _) = create_test_params();
+        let (params, _, _, _) = create_test_params();
         let mut state = AdministrationSubprotoState::new(&params);
         let mut relayer = MockRelayer::<CheckpointIncomingMsg>::new();
 
@@ -563,8 +613,82 @@ mod tests {
     }
 
     #[test]
+    fn test_defcon1_update_forwarded_to_bridge() {
+        let (params, _, _, _) = create_test_params();
+        let mut state = AdministrationSubprotoState::new(&params);
+        let mut relayer = MockRelayer::<BridgeIncomingMsg>::new();
+
+        let update = UpdateAction::Defcon1(Defcon1Update);
+        let update_id = state.next_update_id();
+        let activation_height = 42;
+        state.enqueue(QueuedUpdate::new(update_id, update, activation_height));
+
+        handle_pending_updates(&mut state, &mut relayer, activation_height);
+
+        assert!(state.queued().is_empty());
+        let bridge_msgs = relayer.messages();
+        assert_eq!(bridge_msgs.len(), 1);
+        assert!(
+            matches!(bridge_msgs.first(), Some(BridgeIncomingMsg::Defcon(_))),
+            "expected Defcon message to bridge, got {:?}",
+            bridge_msgs.first()
+        );
+    }
+
+    #[test]
+    fn test_defcon3_update_forwarded_to_bridge() {
+        let (params, _, _, _) = create_test_params();
+        let mut state = AdministrationSubprotoState::new(&params);
+        let mut relayer = MockRelayer::<BridgeIncomingMsg>::new();
+
+        let update = UpdateAction::Defcon3(Defcon3Update);
+        let update_id = state.next_update_id();
+        let activation_height = 42;
+        state.enqueue(QueuedUpdate::new(update_id, update, activation_height));
+
+        handle_pending_updates(&mut state, &mut relayer, activation_height);
+
+        assert!(state.queued().is_empty());
+        let bridge_msgs = relayer.messages();
+        assert_eq!(bridge_msgs.len(), 1);
+        assert!(
+            matches!(bridge_msgs.first(), Some(BridgeIncomingMsg::Defcon(_))),
+            "expected Defcon message to bridge, got {:?}",
+            bridge_msgs.first()
+        );
+    }
+
+    #[test]
+    fn test_safe_harbour_address_update_forwarded_to_bridge() {
+        let (params, _, _, _) = create_test_params();
+        let mut state = AdministrationSubprotoState::new(&params);
+        let mut relayer = MockRelayer::<BridgeIncomingMsg>::new();
+
+        let new_address: SafeHarbourAddress = ArbitraryGenerator::new().generate();
+        let expected_address = new_address.clone();
+        let update = UpdateAction::SafeHarbourAddress(SafeHarbourAddressUpdate::new(new_address));
+        let update_id = state.next_update_id();
+        let activation_height = 42;
+        state.enqueue(QueuedUpdate::new(update_id, update, activation_height));
+
+        handle_pending_updates(&mut state, &mut relayer, activation_height);
+
+        assert!(state.queued().is_empty());
+        let bridge_msgs = relayer.messages();
+        assert_eq!(bridge_msgs.len(), 1);
+        assert!(
+            matches!(
+                bridge_msgs.first(),
+                Some(BridgeIncomingMsg::UpdateSafeHarbourAddress(addr)) if addr == &expected_address
+            ),
+            "expected UpdateSafeHarbourAddress message to bridge, got {:?}",
+            bridge_msgs.first()
+        );
+    }
+
+    #[test]
     fn test_asm_verifying_key_update_emits_log() {
-        let (params, _, _) = create_test_params();
+        let (params, _, _, _) = create_test_params();
         let mut state = AdministrationSubprotoState::new(&params);
         let mut relayer = MockRelayer::<CheckpointIncomingMsg>::new();
 
@@ -596,7 +720,7 @@ mod tests {
     /// - Verify sequence numbers increment, queue shrinks, and updates are removed.
     #[test]
     fn test_strata_administrator_cancel_action() {
-        let (params, admin_sks, _) = create_test_params();
+        let (params, admin_sks, _, _) = create_test_params();
         let mut state = AdministrationSubprotoState::new(&params);
         let mut relayer = MockRelayer::<CheckpointIncomingMsg>::new();
         let no_of_updates = 5;
@@ -665,7 +789,7 @@ mod tests {
     /// - Verify that handle_action returns UnknownAction error
     #[test]
     fn test_strata_administrator_non_existent_cancel() {
-        let (params, admin_sks, _) = create_test_params();
+        let (params, admin_sks, _, _) = create_test_params();
         let mut state = AdministrationSubprotoState::new(&params);
         let mut relayer = MockRelayer::<CheckpointIncomingMsg>::new();
         let current_height = 1000;
@@ -692,7 +816,7 @@ mod tests {
     /// - Verify that cancelling the update action again returns an UnknownAction error.
     #[test]
     fn test_strata_administrator_duplicate_cancels() {
-        let (params, admin_sks, _) = create_test_params();
+        let (params, admin_sks, _, _) = create_test_params();
         let mut relayer = MockRelayer::<CheckpointIncomingMsg>::new();
         let mut state = AdministrationSubprotoState::new(&params);
         let last_seqno = 0;
@@ -743,7 +867,7 @@ mod tests {
     /// `max_seqno_gap` are accepted.
     #[test]
     fn test_seqno_gap_within_limit_succeeds() {
-        let (params, admin_sks, _) = create_test_params();
+        let (params, admin_sks, _, _) = create_test_params();
         let mut state = AdministrationSubprotoState::new(&params);
         let mut relayer = MockRelayer::<CheckpointIncomingMsg>::new();
         let current_height = 1000;
@@ -773,7 +897,7 @@ mod tests {
     /// Test that a sequence number gap exceeding `max_seqno_gap` is rejected.
     #[test]
     fn test_seqno_gap_exceeds_limit_fails() {
-        let (params, admin_sks, _) = create_test_params();
+        let (params, admin_sks, _, _) = create_test_params();
         let mut state = AdministrationSubprotoState::new(&params);
         let mut relayer = MockRelayer::<CheckpointIncomingMsg>::new();
         let current_height = 1000;

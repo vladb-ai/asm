@@ -131,15 +131,24 @@ mod tests {
           ],
           "threshold": 1
         },
+        "strata_security_council": {
+          "keys": [
+            "02bedfa2fa42d906565519bee43875608a09e06640203a6c7a43569150c7cbe7c5"
+          ],
+          "threshold": 1
+        },
         "confirmation_depths": {
           "strata_admin_multisig_update": 144,
           "strata_seq_manager_multisig_update": 144,
           "alpen_admin_multisig_update": 144,
+          "strata_security_council_multisig_update": 144,
           "operator_update": 144,
           "sequencer_update": 144,
           "ol_stf_vk_update": 144,
           "asm_stf_vk_update": 144,
-          "ee_stf_vk_update": 144
+          "ee_stf_vk_update": 144,
+          "defcon3": 144,
+          "safe_harbour_address_update": 144
         },
         "max_seqno_gap": 10
       }
@@ -161,7 +170,7 @@ mod tests {
         "assignment_duration": 0,
         "operator_fee": 0,
         "recovery_delay": 0,
-        "safe_harbour_address": "03671041727b982843f7e3db4669c2f542e05096fb"
+        "safe_harbour_address": "0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
       }
     }
   ]
