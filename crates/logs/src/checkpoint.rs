@@ -4,7 +4,7 @@ use strata_codec::Codec;
 use strata_codec_utils::CodecSsz;
 use strata_msg_fmt::TypeId;
 
-use crate::constants::CHECKPOINT_TIP_UPDATE_LOG_TYPE;
+use crate::constants::AsmLogTypeId;
 
 /// Records a verified [`CheckpointTip`] update from the checkpoint subprotocol.
 #[derive(Debug, Clone, Codec)]
@@ -28,16 +28,44 @@ impl CheckpointTipUpdate {
 }
 
 impl AsmLog for CheckpointTipUpdate {
-    const TY: TypeId = CHECKPOINT_TIP_UPDATE_LOG_TYPE;
+    const TY: TypeId = AsmLogTypeId::CheckpointTipUpdate as TypeId;
 }
 
 #[cfg(test)]
 mod tests {
-    use strata_asm_proto_checkpoint_types::CheckpointTip;
+    use proptest::prelude::*;
+    use strata_asm_common::AsmLogEntry;
+    use strata_asm_proto_checkpoint_types::{test_utils::checkpoint_tip_strategy, CheckpointTip};
     use strata_codec::{decode_buf_exact, encode_to_vec};
     use strata_identifiers::{Buf32, OLBlockCommitment, OLBlockId};
 
     use super::*;
+
+    proptest! {
+        #[test]
+        fn from_log_is_infallible(tip in checkpoint_tip_strategy()) {
+            let update = CheckpointTipUpdate::new(tip);
+            prop_assert!(AsmLogEntry::from_log(&update).is_ok());
+        }
+    }
+
+    #[test]
+    fn from_log_boundary_cases() {
+        let zero_tip = CheckpointTip::new(
+            0,
+            0,
+            OLBlockCommitment::new(0, OLBlockId::from(Buf32::from([0u8; 32]))),
+        );
+        let max_tip = CheckpointTip::new(
+            u32::MAX,
+            u32::MAX,
+            OLBlockCommitment::new(u64::MAX, OLBlockId::from(Buf32::from([0xFFu8; 32]))),
+        );
+        for tip in [zero_tip, max_tip] {
+            let update = CheckpointTipUpdate::new(tip);
+            assert!(AsmLogEntry::from_log(&update).is_ok());
+        }
+    }
 
     #[test]
     fn checkpoint_tip_update_roundtrip() {
@@ -52,14 +80,5 @@ mod tests {
         assert_eq!(decoded.tip().epoch, 7);
         assert_eq!(decoded.tip().l1_height, 100);
         assert_eq!(decoded.tip().l2_commitment(), update.tip().l2_commitment());
-    }
-
-    #[test]
-    fn checkpoint_tip_update_type_id() {
-        assert_eq!(
-            CheckpointTipUpdate::TY,
-            CHECKPOINT_TIP_UPDATE_LOG_TYPE,
-            "type ID must match the constant"
-        );
     }
 }
