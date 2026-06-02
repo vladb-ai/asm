@@ -8121,6 +8121,7 @@ dependencies = [
  "bitcoind-async-client",
  "borsh",
  "corepc-node",
+ "futures",
  "serde",
  "strata-asm-common",
  "strata-asm-stf",
