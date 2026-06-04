@@ -34,6 +34,7 @@ use strata_crypto as _;
 use strata_identifiers as _;
 use strata_l1_txfmt as _;
 use strata_merkle as _;
+use strata_merkle_node_store as _;
 use strata_predicate as _;
 use strata_tasks as _;
 use strata_test_utils_btc as _;

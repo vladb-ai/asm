@@ -279,7 +279,7 @@ impl AsmTestHarness {
 
     /// Get the number of MMR leaves (manifest hashes) stored.
     pub fn get_mmr_leaf_count(&self) -> usize {
-        self.context.inner.lock().unwrap().mmr_leaves.len()
+        self.context.mmr_leaf_count() as usize
     }
 
     /// Get a manifest hash by leaf index.
@@ -297,7 +297,7 @@ impl AsmTestHarness {
 
     /// Get all MMR leaf hashes in leaf-index order.
     pub fn get_mmr_leaves(&self) -> Vec<[u8; 32]> {
-        self.context.inner.lock().unwrap().mmr_leaves.clone()
+        self.context.mmr_leaves()
     }
 
     // Funding & Wallet
