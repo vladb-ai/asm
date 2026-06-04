@@ -1,9 +1,13 @@
-//! [`WorkerContext`] implementation for the ASM runner.
+//! Worker-context trait implementations for the ASM runner.
+//!
+//! Implements the four [`WorkerContext`](strata_asm_worker::WorkerContext)
+//! concern traits ([`L1BlockProvider`], [`AnchorStateStore`],
+//! [`ManifestMmrStore`], [`AuxDataStore`]) for [`AsmWorkerContext`].
 //!
 //! # Moho extension
 //!
 //! When [`MohoStorage`] is configured, we piggyback on the ASM worker: every
-//! anchor-state write in [`WorkerContext::store_anchor_state`] also
+//! anchor-state write in [`AnchorStateStore::store_anchor_state`] also
 //! materializes and persists the derived [`MohoState`] for the same
 //! [`L1BlockCommitment`]. The two databases advance together under a single
 //! call — Moho does not run its own driver, does not subscribe to L1, and
@@ -24,7 +28,10 @@ use strata_asm_proof_db::SledMohoStateDb;
 use strata_asm_proof_impl::moho_program::program::{
     AsmStfProgram, advance_export_state_with_logs, extract_next_predicate_from_logs,
 };
-use strata_asm_worker::{AsmState, WorkerContext, WorkerError, WorkerResult};
+use strata_asm_worker::{
+    AnchorStateStore, AsmState, AuxDataStore, L1BlockProvider, ManifestMmrStore, WorkerError,
+    WorkerResult,
+};
 use strata_btc_types::{BitcoinTxid, BlockHashExt, L1BlockIdBitcoinExt, RawBitcoinTx};
 use strata_identifiers::{Buf32, L1BlockCommitment, L1BlockId};
 use strata_merkle::MerkleProofB32;
@@ -41,7 +48,7 @@ pub(crate) struct MohoStorage {
     pub asm_predicate: PredicateKey,
 }
 
-/// ASM [`WorkerContext`] implementation.
+/// ASM [`WorkerContext`](strata_asm_worker::WorkerContext) implementation.
 ///
 /// Fetches L1 blocks from a Bitcoin node and persists state via local sled
 /// storage. When [`MohoStorage`] is supplied, each anchor-state write also
@@ -131,7 +138,7 @@ impl AsmWorkerContext {
     }
 }
 
-impl WorkerContext for AsmWorkerContext {
+impl L1BlockProvider for AsmWorkerContext {
     fn get_l1_block(&self, blockid: &L1BlockId) -> WorkerResult<Block> {
         let block_hash: BlockHash = blockid.to_block_hash();
         let client = &self.bitcoin_client;
@@ -145,6 +152,40 @@ impl WorkerContext for AsmWorkerContext {
             .map_err(|e: ClientError| WorkerError::BtcRpc(format!("get_block({block_hash}): {e}")))
     }
 
+    fn get_network(&self) -> WorkerResult<Network> {
+        let client = &self.bitcoin_client;
+        self.runtime_handle
+            .block_on(retry_with_backoff_async(
+                "btc_network",
+                self.rpc_max_retries,
+                &self.rpc_backoff,
+                || async { client.network().await },
+            ))
+            .map_err(|e: ClientError| WorkerError::BtcRpc(format!("network: {e}")))
+    }
+
+    fn get_bitcoin_tx(&self, txid: &BitcoinTxid) -> WorkerResult<RawBitcoinTx> {
+        let bitcoin_txid = txid.inner();
+        let client = &self.bitcoin_client;
+        self.runtime_handle
+            .block_on(retry_with_backoff_async(
+                "btc_get_raw_transaction",
+                self.rpc_max_retries,
+                &self.rpc_backoff,
+                || async {
+                    client
+                        .get_raw_transaction_verbosity_zero(&bitcoin_txid)
+                        .await
+                },
+            ))
+            .map(|resp| RawBitcoinTx::from(resp.0))
+            .map_err(|e: ClientError| {
+                WorkerError::BtcRpc(format!("get_raw_transaction({bitcoin_txid}): {e}"))
+            })
+    }
+}
+
+impl AnchorStateStore for AsmWorkerContext {
     fn get_latest_asm_state(&self) -> WorkerResult<Option<(L1BlockCommitment, AsmState)>> {
         self.state_db.get_latest().map_err(|_| WorkerError::DbError)
     }
@@ -191,41 +232,11 @@ impl WorkerContext for AsmWorkerContext {
 
         Ok(())
     }
+}
 
+impl ManifestMmrStore for AsmWorkerContext {
     fn store_l1_manifest(&self, _manifest: AsmManifest) -> WorkerResult<()> {
         Ok(())
-    }
-
-    fn get_network(&self) -> WorkerResult<Network> {
-        let client = &self.bitcoin_client;
-        self.runtime_handle
-            .block_on(retry_with_backoff_async(
-                "btc_network",
-                self.rpc_max_retries,
-                &self.rpc_backoff,
-                || async { client.network().await },
-            ))
-            .map_err(|e: ClientError| WorkerError::BtcRpc(format!("network: {e}")))
-    }
-
-    fn get_bitcoin_tx(&self, txid: &BitcoinTxid) -> WorkerResult<RawBitcoinTx> {
-        let bitcoin_txid = txid.inner();
-        let client = &self.bitcoin_client;
-        self.runtime_handle
-            .block_on(retry_with_backoff_async(
-                "btc_get_raw_transaction",
-                self.rpc_max_retries,
-                &self.rpc_backoff,
-                || async {
-                    client
-                        .get_raw_transaction_verbosity_zero(&bitcoin_txid)
-                        .await
-                },
-            ))
-            .map(|resp| RawBitcoinTx::from(resp.0))
-            .map_err(|e: ClientError| {
-                WorkerError::BtcRpc(format!("get_raw_transaction({bitcoin_txid}): {e}"))
-            })
     }
 
     fn append_manifest_to_mmr(&self, manifest_hash: Buf32) -> WorkerResult<u64> {
@@ -249,7 +260,9 @@ impl WorkerContext for AsmWorkerContext {
             .get_leaf(index)
             .map_err(|_| WorkerError::DbError)
     }
+}
 
+impl AuxDataStore for AsmWorkerContext {
     fn store_aux_data(&self, blockid: &L1BlockCommitment, data: &AuxData) -> WorkerResult<()> {
         self.state_db
             .put_aux_data(blockid, data)

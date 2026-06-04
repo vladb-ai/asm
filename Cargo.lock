@@ -8149,7 +8149,6 @@ name = "strata-asm-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "bitcoin",
  "bitcoind-async-client",
  "borsh",

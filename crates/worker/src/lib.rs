@@ -22,4 +22,6 @@ pub use handle::AsmWorkerHandle;
 pub use message::{AsmWorkerMessage, SubprotocolMessage};
 pub use service::{AsmWorkerService, AsmWorkerStatus};
 pub use state::AsmWorkerServiceState;
-pub use traits::WorkerContext;
+pub use traits::{
+    AnchorStateStore, AuxDataStore, L1BlockProvider, ManifestMmrStore, WorkerContext,
+};

@@ -141,7 +141,6 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use async_trait::async_trait;
     use bitcoin::{BlockHash, Network, block::Header};
     use bitcoind_async_client::{
         Client,
@@ -158,6 +157,7 @@ mod tests {
     use strata_test_utils_btcio::{get_bitcoind_and_client, mine_blocks};
 
     use super::*;
+    use crate::{AnchorStateStore, AuxDataStore, L1BlockProvider, ManifestMmrStore};
 
     struct TestEnv {
         pub _node: Node, // Keep node alive
@@ -236,8 +236,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl WorkerContext for MockWorkerContext {
+    impl L1BlockProvider for MockWorkerContext {
         fn get_l1_block(&self, blockid: &L1BlockId) -> WorkerResult<Block> {
             self.blocks
                 .lock()
@@ -247,6 +246,16 @@ mod tests {
                 .ok_or(WorkerError::MissingL1Block(*blockid))
         }
 
+        fn get_network(&self) -> WorkerResult<Network> {
+            Ok(Network::Regtest)
+        }
+
+        fn get_bitcoin_tx(&self, _txid: &BitcoinTxid) -> WorkerResult<RawBitcoinTx> {
+            Err(WorkerError::Unimplemented)
+        }
+    }
+
+    impl AnchorStateStore for MockWorkerContext {
         fn get_anchor_state(&self, blockid: &L1BlockCommitment) -> WorkerResult<AsmState> {
             self.asm_states
                 .lock()
@@ -272,18 +281,12 @@ mod tests {
             *self.latest_asm_state.lock().unwrap() = Some((*blockid, state.clone()));
             Ok(())
         }
+    }
 
+    impl ManifestMmrStore for MockWorkerContext {
         fn store_l1_manifest(&self, _manifest: AsmManifest) -> WorkerResult<()> {
             // Mock implementation - no-op for tests
             Ok(())
-        }
-
-        fn get_network(&self) -> WorkerResult<Network> {
-            Ok(Network::Regtest)
-        }
-
-        fn get_bitcoin_tx(&self, _txid: &BitcoinTxid) -> WorkerResult<RawBitcoinTx> {
-            Err(WorkerError::Unimplemented)
         }
 
         fn append_manifest_to_mmr(&self, _manifest_hash: Hash) -> WorkerResult<u64> {
@@ -301,7 +304,9 @@ mod tests {
         fn get_manifest_hash(&self, _index: u64) -> WorkerResult<Option<Hash>> {
             Ok(None)
         }
+    }
 
+    impl AuxDataStore for MockWorkerContext {
         fn store_aux_data(
             &self,
             _blockid: &L1BlockCommitment,

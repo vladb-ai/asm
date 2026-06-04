@@ -11,7 +11,10 @@ use std::{
 use bitcoin::{block::Header, params::Params, Block, BlockHash, Network, Txid};
 use bitcoind_async_client::{traits::Reader, Client};
 use strata_asm_manifest_types::AsmManifest;
-use strata_asm_worker::{AsmState, WorkerContext, WorkerError, WorkerResult};
+use strata_asm_worker::{
+    AnchorStateStore, AsmState, AuxDataStore, L1BlockProvider, ManifestMmrStore, WorkerError,
+    WorkerResult,
+};
 use strata_btc_types::{BitcoinTxid, BlockHashExt, L1BlockIdBitcoinExt, RawBitcoinTx};
 use strata_btc_verification::{get_relative_difficulty_adjustment_height, L1Anchor};
 use strata_identifiers::{Buf32, Hash, L1BlockCommitment, L1BlockId};
@@ -93,7 +96,7 @@ impl TestAsmWorkerContext {
     }
 }
 
-impl WorkerContext for TestAsmWorkerContext {
+impl L1BlockProvider for TestAsmWorkerContext {
     fn get_l1_block(&self, blockid: &L1BlockId) -> WorkerResult<Block> {
         // Try cache first
         if let Some(block) = self.inner.lock().unwrap().block_cache.get(blockid).cloned() {
@@ -126,6 +129,28 @@ impl WorkerContext for TestAsmWorkerContext {
         Ok(block)
     }
 
+    fn get_network(&self) -> WorkerResult<Network> {
+        Ok(Network::Regtest)
+    }
+
+    fn get_bitcoin_tx(&self, txid: &BitcoinTxid) -> WorkerResult<RawBitcoinTx> {
+        let txid_inner: Txid = (*txid).into();
+
+        // See `get_l1_block` for the two-context branching rationale.
+        let client = self.client.clone();
+        let fetch = || async move { client.get_raw_transaction_verbosity_zero(&txid_inner).await };
+        let raw_tx_result = if Handle::try_current().is_ok() {
+            block_in_place(|| self.tokio_handle.block_on(fetch()))
+        } else {
+            self.tokio_handle.block_on(fetch())
+        }
+        .map_err(|_| WorkerError::BitcoinTxNotFound(*txid))?;
+
+        Ok(RawBitcoinTx::from(raw_tx_result.0))
+    }
+}
+
+impl AnchorStateStore for TestAsmWorkerContext {
     fn get_anchor_state(&self, blockid: &L1BlockCommitment) -> WorkerResult<AsmState> {
         self.inner
             .lock()
@@ -150,27 +175,9 @@ impl WorkerContext for TestAsmWorkerContext {
         inner.latest_asm_state = Some((*blockid, state.clone()));
         Ok(())
     }
+}
 
-    fn get_network(&self) -> WorkerResult<Network> {
-        Ok(Network::Regtest)
-    }
-
-    fn get_bitcoin_tx(&self, txid: &BitcoinTxid) -> WorkerResult<RawBitcoinTx> {
-        let txid_inner: Txid = (*txid).into();
-
-        // See `get_l1_block` for the two-context branching rationale.
-        let client = self.client.clone();
-        let fetch = || async move { client.get_raw_transaction_verbosity_zero(&txid_inner).await };
-        let raw_tx_result = if Handle::try_current().is_ok() {
-            block_in_place(|| self.tokio_handle.block_on(fetch()))
-        } else {
-            self.tokio_handle.block_on(fetch())
-        }
-        .map_err(|_| WorkerError::BitcoinTxNotFound(*txid))?;
-
-        Ok(RawBitcoinTx::from(raw_tx_result.0))
-    }
-
+impl ManifestMmrStore for TestAsmWorkerContext {
     fn append_manifest_to_mmr(&self, manifest_hash: Hash) -> WorkerResult<u64> {
         let hash_bytes: [u8; 32] = *manifest_hash.as_ref();
         let mut inner = self.inner.lock().unwrap();
@@ -261,7 +268,9 @@ impl WorkerContext for TestAsmWorkerContext {
         self.inner.lock().unwrap().manifests.push(manifest);
         Ok(())
     }
+}
 
+impl AuxDataStore for TestAsmWorkerContext {
     fn store_aux_data(
         &self,
         _blockid: &L1BlockCommitment,

@@ -30,7 +30,6 @@ strata-test-utils-arb.workspace = true
 strata-test-utils-btcio.workspace = true
 strata-asm-params = { workspace = true, features = ["arbitrary"] }
 
-async-trait.workspace = true
 bitcoind-async-client.workspace = true
 corepc-node.workspace = true
 tokio.workspace = true

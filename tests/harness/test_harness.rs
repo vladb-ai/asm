@@ -52,7 +52,9 @@ use corepc_node::Node;
 use rand::RngCore;
 use strata_asm_params::{AdministrationInitConfig, AsmParams, SubprotocolInstance};
 use strata_asm_spec::StrataAsmSpec;
-use strata_asm_worker::{AsmState, AsmWorkerBuilder, AsmWorkerHandle, WorkerContext};
+use strata_asm_worker::{
+    AnchorStateStore, AsmState, AsmWorkerBuilder, AsmWorkerHandle, ManifestMmrStore,
+};
 use strata_btc_types::BlockHashExt;
 use strata_identifiers::{Buf32, L1BlockCommitment};
 use strata_l1_envelope_fmt::builder::{build_envelope_script, EnvelopeScriptBuilder};
