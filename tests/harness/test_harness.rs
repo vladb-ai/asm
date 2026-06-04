@@ -695,12 +695,12 @@ impl AsmTestHarnessBuilder {
         }
         let asm_params = Arc::new(asm_params);
 
-        // 5. Create worker context. The MMR is height-indexed: prefill it with
-        // sentinel leaves for L1 heights `0..=genesis_height`, matching the
+        // 5. Create worker context. The worker prefills the height-indexed MMR
+        // with sentinel leaves for L1 heights `0..=genesis_height` during
+        // startup (`ManifestMmrStore::prefill_manifest_mmr`), matching the
         // proven (in-state) MMR's genesis prefill so external leaf indices
         // equal L1 block heights.
         let context = TestAsmWorkerContext::new((*client).clone());
-        context.prefill_mmr(genesis_height + 1);
 
         // 6. Create task executor
         let task_manager = TaskManager::new(Handle::current());

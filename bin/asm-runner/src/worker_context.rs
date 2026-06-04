@@ -22,7 +22,7 @@ use bitcoin::{Block, BlockHash, Network};
 use bitcoind_async_client::{Client, error::ClientError, traits::Reader};
 use moho_runtime_interface::MohoProgram;
 use moho_types::{ExportState, MohoState};
-use strata_asm_common::{AnchorState, AsmManifest, AuxData};
+use strata_asm_common::{AnchorState, AsmManifest, AuxData, MMR_SENTINEL_DUMMY_LEAF};
 use strata_asm_logs::NewExportEntry;
 use strata_asm_proof_db::SledMohoStateDb;
 use strata_asm_proof_impl::moho_program::program::{
@@ -235,6 +235,12 @@ impl AnchorStateStore for AsmWorkerContext {
 }
 
 impl ManifestMmrStore for AsmWorkerContext {
+    fn prefill_manifest_mmr(&self, genesis_height: u64) -> WorkerResult<()> {
+        self.mmr_db
+            .prefill_to(genesis_height + 1, Buf32::new(MMR_SENTINEL_DUMMY_LEAF))
+            .map_err(|_| WorkerError::DbError)
+    }
+
     fn store_l1_manifest(&self, _manifest: AsmManifest) -> WorkerResult<()> {
         Ok(())
     }

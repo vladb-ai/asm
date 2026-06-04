@@ -178,6 +178,11 @@ impl AnchorStateStore for TestAsmWorkerContext {
 }
 
 impl ManifestMmrStore for TestAsmWorkerContext {
+    fn prefill_manifest_mmr(&self, genesis_height: u64) -> WorkerResult<()> {
+        self.prefill_mmr(genesis_height + 1);
+        Ok(())
+    }
+
     fn append_manifest_to_mmr(&self, manifest_hash: Hash) -> WorkerResult<u64> {
         let hash_bytes: [u8; 32] = *manifest_hash.as_ref();
         let mut inner = self.inner.lock().unwrap();

@@ -44,6 +44,13 @@ where
     /// Creates a new service state, loading the latest anchor or creating genesis.
     pub fn new(context: W, spec: S, params: S::Params) -> WorkerResult<Self> {
         let genesis_height = spec.genesis_l1_height(&params);
+
+        // Align the manifest MMR with L1 heights before processing any block:
+        // it is height-indexed, prefilled with sentinels for heights
+        // `0..=genesis_height` so the manifest for height `h` lands at index
+        // `h`. Idempotent, so safe to run on every startup.
+        context.prefill_manifest_mmr(genesis_height)?;
+
         let (anchor, blkid) = match context.get_latest_asm_state()? {
             Some((blkid, state)) => (state, blkid),
             None => {
@@ -284,6 +291,10 @@ mod tests {
     }
 
     impl ManifestMmrStore for MockWorkerContext {
+        fn prefill_manifest_mmr(&self, _genesis_height: u64) -> WorkerResult<()> {
+            Ok(())
+        }
+
         fn store_l1_manifest(&self, _manifest: AsmManifest) -> WorkerResult<()> {
             // Mock implementation - no-op for tests
             Ok(())

@@ -50,6 +50,19 @@ pub trait AnchorStateStore {
 
 /// Persists L1 manifests and maintains the manifest-hash MMR.
 pub trait ManifestMmrStore {
+    /// Prefills the manifest MMR with sentinel leaves so that real manifests
+    /// land at a leaf index equal to their L1 block height.
+    ///
+    /// The MMR is height-indexed: positions `0..=genesis_height` are filled
+    /// with [`strata_asm_common::MMR_SENTINEL_DUMMY_LEAF`], so the manifest
+    /// produced for height `h` appends at leaf index `h`. This mirrors the
+    /// in-memory (proven) MMR's genesis prefill.
+    ///
+    /// Called once at worker startup, before any manifest is appended. Must be
+    /// idempotent: a no-op once the MMR already holds `genesis_height + 1`
+    /// entries, so it is safe to run on every restart.
+    fn prefill_manifest_mmr(&self, genesis_height: u64) -> WorkerResult<()>;
+
     /// Stores an [`AsmManifest`] to the L1 database.
     ///
     /// This should be called after each STF execution with the produced manifest.
