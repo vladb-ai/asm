@@ -8004,7 +8004,6 @@ name = "strata-asm-prover-perf"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "borsh",
  "clap",
  "moho-recursive-proof",
  "moho-runtime-impl",
@@ -8048,7 +8047,6 @@ dependencies = [
  "bitcoin",
  "bitcoincore-zmq",
  "bitcoind-async-client",
- "borsh",
  "clap",
  "futures",
  "hex",
