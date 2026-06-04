@@ -71,18 +71,6 @@ impl TestAsmWorkerContext {
         }
     }
 
-    /// Prefill the in-memory MMR with sentinel leaves up to `target_count`,
-    /// mirroring the proven MMR's genesis prefill so DB-side leaf indices
-    /// equal L1 block heights.
-    pub fn prefill_mmr(&self, target_count: u64) {
-        let sentinel = strata_asm_common::MMR_SENTINEL_DUMMY_LEAF;
-        let mut inner = self.inner.lock().unwrap();
-        for _ in inner.mmr_leaves.len() as u64..target_count {
-            inner.mmr_leaves.push(sentinel);
-        }
-        inner.mmr_prefill_count = target_count.max(inner.mmr_prefill_count);
-    }
-
     /// Fetch a block from regtest by hash, caching it for future use
     pub async fn fetch_and_cache_block(&self, block_hash: BlockHash) -> anyhow::Result<Block> {
         let block = self.client.get_block(&block_hash).await?;
@@ -178,17 +166,33 @@ impl AnchorStateStore for TestAsmWorkerContext {
 }
 
 impl ManifestMmrStore for TestAsmWorkerContext {
-    fn prefill_manifest_mmr(&self, genesis_height: u64) -> WorkerResult<()> {
-        self.prefill_mmr(genesis_height + 1);
+    fn put_manifest(&self, manifest: AsmManifest) -> WorkerResult<()> {
+        self.inner.lock().unwrap().manifests.push(manifest);
         Ok(())
     }
 
-    fn append_manifest_to_mmr(&self, manifest_hash: Hash) -> WorkerResult<u64> {
-        let hash_bytes: [u8; 32] = *manifest_hash.as_ref();
+    fn put_manifest_hash(&self, height: u64, hash: Hash) -> WorkerResult<()> {
         let mut inner = self.inner.lock().unwrap();
-        let leaf_index = inner.mmr_leaves.len() as u64;
+        let index = inner.mmr_leaves.len() as u64;
+        if index != height {
+            return Err(WorkerError::ManifestMmrMisaligned { height, index });
+        }
+        let hash_bytes: [u8; 32] = *hash.as_ref();
         inner.mmr_leaves.push(hash_bytes);
-        Ok(leaf_index)
+
+        // Sentinel-prefill leaves form a contiguous prefix (prefill runs before
+        // any real manifest). Track its length so `generate_mmr_proof_at` can
+        // materialise it in O(log N) via `new_repeated`.
+        if hash_bytes == strata_asm_common::MMR_SENTINEL_DUMMY_LEAF
+            && inner.mmr_prefill_count == index
+        {
+            inner.mmr_prefill_count = index + 1;
+        }
+        Ok(())
+    }
+
+    fn manifest_mmr_leaf_count(&self) -> WorkerResult<u64> {
+        Ok(self.inner.lock().unwrap().mmr_leaves.len() as u64)
     }
 
     fn generate_mmr_proof_at(
@@ -267,11 +271,6 @@ impl ManifestMmrStore for TestAsmWorkerContext {
             .get(index as usize)
             .copied()
             .map(Buf32::from))
-    }
-
-    fn store_l1_manifest(&self, manifest: AsmManifest) -> WorkerResult<()> {
-        self.inner.lock().unwrap().manifests.push(manifest);
-        Ok(())
     }
 }
 

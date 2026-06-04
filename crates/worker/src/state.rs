@@ -291,16 +291,16 @@ mod tests {
     }
 
     impl ManifestMmrStore for MockWorkerContext {
-        fn prefill_manifest_mmr(&self, _genesis_height: u64) -> WorkerResult<()> {
-            Ok(())
-        }
-
-        fn store_l1_manifest(&self, _manifest: AsmManifest) -> WorkerResult<()> {
+        fn put_manifest(&self, _manifest: AsmManifest) -> WorkerResult<()> {
             // Mock implementation - no-op for tests
             Ok(())
         }
 
-        fn append_manifest_to_mmr(&self, _manifest_hash: Hash) -> WorkerResult<u64> {
+        fn put_manifest_hash(&self, _height: u64, _hash: Hash) -> WorkerResult<()> {
+            Ok(())
+        }
+
+        fn manifest_mmr_leaf_count(&self) -> WorkerResult<u64> {
             Ok(0)
         }
 

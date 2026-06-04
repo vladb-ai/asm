@@ -14,9 +14,9 @@
 //! the narrower trait instead of the whole context.
 
 use bitcoin::{Block, Network};
-use strata_asm_common::{AsmManifest, AuxData};
+use strata_asm_common::{AsmManifest, AuxData, MMR_SENTINEL_DUMMY_LEAF};
 use strata_btc_types::{BitcoinTxid, RawBitcoinTx};
-use strata_identifiers::{Hash, L1BlockCommitment, L1BlockId};
+use strata_identifiers::{Buf32, Hash, L1BlockCommitment, L1BlockId};
 use strata_merkle::MerkleProofB32;
 
 use crate::{AsmState, WorkerResult};
@@ -50,28 +50,64 @@ pub trait AnchorStateStore {
 
 /// Persists L1 manifests and maintains the manifest-hash MMR.
 pub trait ManifestMmrStore {
+    /// Persists the full [`AsmManifest`] struct.
+    ///
+    /// Does not touch the MMR — pair with
+    /// [`put_manifest_hash`](Self::put_manifest_hash), or call
+    /// [`record_manifest`](Self::record_manifest) to do both.
+    fn put_manifest(&self, manifest: AsmManifest) -> WorkerResult<()>;
+
+    /// Appends a manifest `hash` to the MMR as the leaf for L1 `height`.
+    ///
+    /// The MMR is height-indexed (see
+    /// [`prefill_manifest_mmr`](Self::prefill_manifest_mmr)): with the genesis
+    /// prefill in place, the leaf for `height` lands at index `height`.
+    /// Implementations must reject a `height` that does not match the next
+    /// append position, since that signals a gap or out-of-order processing
+    /// that would corrupt the height-to-index alignment.
+    fn put_manifest_hash(&self, height: u64, hash: Hash) -> WorkerResult<()>;
+
     /// Prefills the manifest MMR with sentinel leaves so that real manifests
     /// land at a leaf index equal to their L1 block height.
     ///
     /// The MMR is height-indexed: positions `0..=genesis_height` are filled
-    /// with [`strata_asm_common::MMR_SENTINEL_DUMMY_LEAF`], so the manifest
-    /// produced for height `h` appends at leaf index `h`. This mirrors the
-    /// in-memory (proven) MMR's genesis prefill.
+    /// with [`MMR_SENTINEL_DUMMY_LEAF`], so the manifest produced for height
+    /// `h` appends at leaf index `h`. This mirrors the in-memory (proven) MMR's
+    /// genesis prefill.
     ///
-    /// Called once at worker startup, before any manifest is appended. Must be
-    /// idempotent: a no-op once the MMR already holds `genesis_height + 1`
-    /// entries, so it is safe to run on every restart.
-    fn prefill_manifest_mmr(&self, genesis_height: u64) -> WorkerResult<()>;
+    /// Called once at worker startup, before any manifest is appended. The
+    /// default appends sentinels from the current leaf count up to and
+    /// including `genesis_height`, which makes it idempotent: a no-op once the
+    /// MMR already holds `genesis_height + 1` entries, so it is safe to run on
+    /// every restart.
+    fn prefill_manifest_mmr(&self, genesis_height: u64) -> WorkerResult<()> {
+        let sentinel = Buf32::new(MMR_SENTINEL_DUMMY_LEAF);
+        for height in self.manifest_mmr_leaf_count()?..=genesis_height {
+            self.put_manifest_hash(height, sentinel)?;
+        }
+        Ok(())
+    }
 
-    /// Stores an [`AsmManifest`] to the L1 database.
+    /// Persists a manifest in full: the [`AsmManifest`] struct via
+    /// [`put_manifest`](Self::put_manifest) and its hash into the
+    /// height-indexed MMR via [`put_manifest_hash`](Self::put_manifest_hash).
     ///
-    /// This should be called after each STF execution with the produced manifest.
-    fn store_l1_manifest(&self, manifest: AsmManifest) -> WorkerResult<()>;
+    /// Called after each STF execution. Provided as a default that composes the
+    /// two primitives, deriving the height and hash from the manifest; backends
+    /// implement those primitives, not this.
+    fn record_manifest(&self, manifest: AsmManifest) -> WorkerResult<()> {
+        let height = u64::from(manifest.height());
+        let hash: Hash = manifest.compute_hash().into();
+        self.put_manifest(manifest)?;
+        self.put_manifest_hash(height, hash)
+    }
 
-    /// Appends a manifest hash to the MMR database and returns the leaf index.
-    ///
-    /// This should be called after each STF execution with the manifest hash.
-    fn append_manifest_to_mmr(&self, manifest_hash: Hash) -> WorkerResult<u64>;
+    /// Returns the number of leaves currently in the MMR — equivalently, the
+    /// index at which the next [`put_manifest_hash`](Self::put_manifest_hash)
+    /// will append. Used by
+    /// [`prefill_manifest_mmr`](Self::prefill_manifest_mmr) to resume
+    /// prefilling from the current position.
+    fn manifest_mmr_leaf_count(&self) -> WorkerResult<u64>;
 
     /// Generates an MMR inclusion proof for a leaf at a specific MMR size.
     ///

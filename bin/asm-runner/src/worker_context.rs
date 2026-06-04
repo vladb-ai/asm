@@ -22,7 +22,7 @@ use bitcoin::{Block, BlockHash, Network};
 use bitcoind_async_client::{Client, error::ClientError, traits::Reader};
 use moho_runtime_interface::MohoProgram;
 use moho_types::{ExportState, MohoState};
-use strata_asm_common::{AnchorState, AsmManifest, AuxData, MMR_SENTINEL_DUMMY_LEAF};
+use strata_asm_common::{AnchorState, AsmManifest, AuxData};
 use strata_asm_logs::NewExportEntry;
 use strata_asm_proof_db::SledMohoStateDb;
 use strata_asm_proof_impl::moho_program::program::{
@@ -235,20 +235,25 @@ impl AnchorStateStore for AsmWorkerContext {
 }
 
 impl ManifestMmrStore for AsmWorkerContext {
-    fn prefill_manifest_mmr(&self, genesis_height: u64) -> WorkerResult<()> {
-        self.mmr_db
-            .prefill_to(genesis_height + 1, Buf32::new(MMR_SENTINEL_DUMMY_LEAF))
-            .map_err(|_| WorkerError::DbError)
-    }
-
-    fn store_l1_manifest(&self, _manifest: AsmManifest) -> WorkerResult<()> {
+    fn put_manifest(&self, _manifest: AsmManifest) -> WorkerResult<()> {
+        // Full-manifest persistence (for chaintsn and other consumers) is not
+        // wired up yet; only the hash enters the MMR (via `put_manifest_hash`).
         Ok(())
     }
 
-    fn append_manifest_to_mmr(&self, manifest_hash: Buf32) -> WorkerResult<u64> {
-        self.mmr_db
-            .append_leaf(manifest_hash)
-            .map_err(|_| WorkerError::DbError)
+    fn put_manifest_hash(&self, height: u64, hash: Buf32) -> WorkerResult<()> {
+        let index = self
+            .mmr_db
+            .append_leaf(hash)
+            .map_err(|_| WorkerError::DbError)?;
+        if index != height {
+            return Err(WorkerError::ManifestMmrMisaligned { height, index });
+        }
+        Ok(())
+    }
+
+    fn manifest_mmr_leaf_count(&self) -> WorkerResult<u64> {
+        self.mmr_db.leaf_count().map_err(|_| WorkerError::DbError)
     }
 
     fn generate_mmr_proof_at(
