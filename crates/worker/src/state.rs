@@ -312,8 +312,8 @@ mod tests {
             Err(WorkerError::Unimplemented)
         }
 
-        fn get_manifest_hash(&self, _index: u64) -> WorkerResult<Option<AsmManifestHash>> {
-            Ok(None)
+        fn get_manifest_hash(&self, index: u64) -> WorkerResult<AsmManifestHash> {
+            Err(WorkerError::ManifestHashNotFound { index })
         }
     }
 
@@ -326,8 +326,8 @@ mod tests {
             Ok(())
         }
 
-        fn get_aux_data(&self, _blockid: &L1BlockCommitment) -> WorkerResult<Option<AuxData>> {
-            Ok(None)
+        fn get_aux_data(&self, blockid: &L1BlockCommitment) -> WorkerResult<AuxData> {
+            Err(WorkerError::MissingAuxData(*blockid))
         }
     }
 

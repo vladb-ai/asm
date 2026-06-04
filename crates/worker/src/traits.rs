@@ -123,8 +123,9 @@ pub trait ManifestMmrStore {
 
     /// Retrieves a manifest hash by its MMR leaf index.
     ///
-    /// Reads the hash directly from the MMR structure.
-    fn get_manifest_hash(&self, index: u64) -> WorkerResult<Option<AsmManifestHash>>;
+    /// Reads the hash directly from the MMR structure. Errors with
+    /// `ManifestHashNotFound` if no leaf exists at `index`.
+    fn get_manifest_hash(&self, index: u64) -> WorkerResult<AsmManifestHash>;
 }
 
 /// Persists and loads per-block auxiliary data for the prover.
@@ -135,8 +136,9 @@ pub trait AuxDataStore {
     /// used during the transition, so the prover can use it as input.
     fn store_aux_data(&self, blockid: &L1BlockCommitment, data: &AuxData) -> WorkerResult<()>;
 
-    /// Retrieves [`AuxData`] for a given L1 block.
-    fn get_aux_data(&self, blockid: &L1BlockCommitment) -> WorkerResult<Option<AuxData>>;
+    /// Retrieves [`AuxData`] for a given L1 block. Errors with `MissingAuxData`
+    /// if none was stored for `blockid`.
+    fn get_aux_data(&self, blockid: &L1BlockCommitment) -> WorkerResult<AuxData>;
 }
 
 /// Context trait for a worker to interact with the database and Bitcoin Client.

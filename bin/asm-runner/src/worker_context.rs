@@ -266,12 +266,12 @@ impl ManifestMmrStore for AsmWorkerContext {
             .map_err(|_| WorkerError::MmrProofFailed { index })
     }
 
-    fn get_manifest_hash(&self, index: u64) -> WorkerResult<Option<AsmManifestHash>> {
-        Ok(self
-            .mmr_db
+    fn get_manifest_hash(&self, index: u64) -> WorkerResult<AsmManifestHash> {
+        self.mmr_db
             .get_leaf(index)
             .map_err(|_| WorkerError::DbError)?
-            .map(AsmManifestHash::from))
+            .map(AsmManifestHash::from)
+            .ok_or(WorkerError::ManifestHashNotFound { index })
     }
 }
 
@@ -282,10 +282,11 @@ impl AuxDataStore for AsmWorkerContext {
             .map_err(|_| WorkerError::DbError)
     }
 
-    fn get_aux_data(&self, blockid: &L1BlockCommitment) -> WorkerResult<Option<AuxData>> {
+    fn get_aux_data(&self, blockid: &L1BlockCommitment) -> WorkerResult<AuxData> {
         self.state_db
             .get_aux_data(blockid)
-            .map_err(|_| WorkerError::DbError)
+            .map_err(|_| WorkerError::DbError)?
+            .ok_or(WorkerError::MissingAuxData(*blockid))
     }
 }
 

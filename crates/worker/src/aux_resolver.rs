@@ -26,7 +26,7 @@ use strata_asm_common::{
 };
 use tracing::*;
 
-use crate::{L1BlockProvider, ManifestMmrStore, WorkerError, WorkerResult};
+use crate::{L1BlockProvider, ManifestMmrStore, WorkerResult};
 
 /// Auxiliary data resolver that fetches external data required by subprotocols.
 ///
@@ -183,10 +183,7 @@ impl<'a, C: ?Sized + L1BlockProvider + ManifestMmrStore> AuxDataResolver<'a, C> 
             // L1 block height == MMR leaf index (height-indexed MMR).
             for mmr_index in start_height..=end_height {
                 // Fetch manifest hash from storage
-                let hash = self
-                    .context
-                    .get_manifest_hash(mmr_index)?
-                    .ok_or(WorkerError::ManifestHashNotFound { index: mmr_index })?;
+                let hash = self.context.get_manifest_hash(mmr_index)?;
 
                 // Generate MMR proof for this index
                 let proof_b32 = self

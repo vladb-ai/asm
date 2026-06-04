@@ -286,7 +286,7 @@ impl AsmTestHarness {
     pub fn get_manifest_hash(
         &self,
         index: u64,
-    ) -> anyhow::Result<Option<strata_asm_manifest_types::AsmManifestHash>> {
+    ) -> anyhow::Result<strata_asm_manifest_types::AsmManifestHash> {
         Ok(self.context.get_manifest_hash(index)?)
     }
 
