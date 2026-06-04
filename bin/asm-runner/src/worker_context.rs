@@ -22,7 +22,7 @@ use bitcoin::{Block, BlockHash, Network};
 use bitcoind_async_client::{Client, error::ClientError, traits::Reader};
 use moho_runtime_interface::MohoProgram;
 use moho_types::{ExportState, MohoState};
-use strata_asm_common::{AnchorState, AsmManifest, AuxData};
+use strata_asm_common::{AnchorState, AsmManifest, AsmManifestHash, AuxData};
 use strata_asm_logs::NewExportEntry;
 use strata_asm_proof_db::SledMohoStateDb;
 use strata_asm_proof_impl::moho_program::program::{
@@ -33,7 +33,7 @@ use strata_asm_worker::{
     WorkerResult,
 };
 use strata_btc_types::{BitcoinTxid, BlockHashExt, L1BlockIdBitcoinExt, RawBitcoinTx};
-use strata_identifiers::{Buf32, L1BlockCommitment, L1BlockId};
+use strata_identifiers::{L1BlockCommitment, L1BlockId};
 use strata_merkle::MerkleProofB32;
 use strata_predicate::PredicateKey;
 use tokio::runtime::Handle;
@@ -241,10 +241,10 @@ impl ManifestMmrStore for AsmWorkerContext {
         Ok(())
     }
 
-    fn put_manifest_hash(&self, height: u64, hash: Buf32) -> WorkerResult<()> {
+    fn put_manifest_hash(&self, height: u64, hash: AsmManifestHash) -> WorkerResult<()> {
         let index = self
             .mmr_db
-            .append_leaf(hash)
+            .append_leaf(hash.into())
             .map_err(|_| WorkerError::DbError)?;
         if index != height {
             return Err(WorkerError::ManifestMmrMisaligned { height, index });
@@ -266,10 +266,12 @@ impl ManifestMmrStore for AsmWorkerContext {
             .map_err(|_| WorkerError::MmrProofFailed { index })
     }
 
-    fn get_manifest_hash(&self, index: u64) -> WorkerResult<Option<Buf32>> {
-        self.mmr_db
+    fn get_manifest_hash(&self, index: u64) -> WorkerResult<Option<AsmManifestHash>> {
+        Ok(self
+            .mmr_db
             .get_leaf(index)
-            .map_err(|_| WorkerError::DbError)
+            .map_err(|_| WorkerError::DbError)?
+            .map(AsmManifestHash::from))
     }
 }
 

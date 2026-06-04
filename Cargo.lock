@@ -8155,7 +8155,6 @@ dependencies = [
  "corepc-node",
  "serde",
  "strata-asm-common",
- "strata-asm-manifest-types",
  "strata-asm-params",
  "strata-asm-spec",
  "strata-asm-stf",

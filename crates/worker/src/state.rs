@@ -154,12 +154,12 @@ mod tests {
         traits::{Reader, Wallet},
     };
     use corepc_node::Node;
-    use strata_asm_common::AsmManifest;
+    use strata_asm_common::{AsmManifest, AsmManifestHash};
     use strata_asm_params::AsmParams;
     use strata_asm_spec::StrataAsmSpec;
     use strata_btc_types::{BitcoinTxid, BlockHashExt, RawBitcoinTx};
     use strata_btc_verification::L1Anchor;
-    use strata_identifiers::{Hash, L1BlockId};
+    use strata_identifiers::L1BlockId;
     use strata_test_utils_arb::ArbitraryGenerator;
     use strata_test_utils_btcio::{get_bitcoind_and_client, mine_blocks};
 
@@ -296,7 +296,7 @@ mod tests {
             Ok(())
         }
 
-        fn put_manifest_hash(&self, _height: u64, _hash: Hash) -> WorkerResult<()> {
+        fn put_manifest_hash(&self, _height: u64, _hash: AsmManifestHash) -> WorkerResult<()> {
             Ok(())
         }
 
@@ -312,7 +312,7 @@ mod tests {
             Err(WorkerError::Unimplemented)
         }
 
-        fn get_manifest_hash(&self, _index: u64) -> WorkerResult<Option<Hash>> {
+        fn get_manifest_hash(&self, _index: u64) -> WorkerResult<Option<AsmManifestHash>> {
             Ok(None)
         }
     }

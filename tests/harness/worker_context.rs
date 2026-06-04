@@ -10,14 +10,14 @@ use std::{
 
 use bitcoin::{block::Header, params::Params, Block, BlockHash, Network, Txid};
 use bitcoind_async_client::{traits::Reader, Client};
-use strata_asm_manifest_types::AsmManifest;
+use strata_asm_manifest_types::{AsmManifest, AsmManifestHash};
 use strata_asm_worker::{
     AnchorStateStore, AsmState, AuxDataStore, L1BlockProvider, ManifestMmrStore, WorkerError,
     WorkerResult,
 };
 use strata_btc_types::{BitcoinTxid, BlockHashExt, L1BlockIdBitcoinExt, RawBitcoinTx};
 use strata_btc_verification::{get_relative_difficulty_adjustment_height, L1Anchor};
-use strata_identifiers::{Buf32, Hash, L1BlockCommitment, L1BlockId};
+use strata_identifiers::{L1BlockCommitment, L1BlockId};
 use strata_merkle::{MerkleProofB32, Mmr, Mmr64B32, MmrState, Sha256Hasher};
 use tokio::{runtime::Handle, task::block_in_place};
 
@@ -171,7 +171,7 @@ impl ManifestMmrStore for TestAsmWorkerContext {
         Ok(())
     }
 
-    fn put_manifest_hash(&self, height: u64, hash: Hash) -> WorkerResult<()> {
+    fn put_manifest_hash(&self, height: u64, hash: AsmManifestHash) -> WorkerResult<()> {
         let mut inner = self.inner.lock().unwrap();
         let index = inner.mmr_leaves.len() as u64;
         if index != height {
@@ -262,7 +262,7 @@ impl ManifestMmrStore for TestAsmWorkerContext {
             .ok_or(WorkerError::MmrProofFailed { index })
     }
 
-    fn get_manifest_hash(&self, index: u64) -> WorkerResult<Option<Hash>> {
+    fn get_manifest_hash(&self, index: u64) -> WorkerResult<Option<AsmManifestHash>> {
         Ok(self
             .inner
             .lock()
@@ -270,7 +270,7 @@ impl ManifestMmrStore for TestAsmWorkerContext {
             .mmr_leaves
             .get(index as usize)
             .copied()
-            .map(Buf32::from))
+            .map(AsmManifestHash::from))
     }
 }
 

@@ -14,9 +14,9 @@
 //! the narrower trait instead of the whole context.
 
 use bitcoin::{Block, Network};
-use strata_asm_common::{AsmManifest, AuxData, MMR_SENTINEL_DUMMY_LEAF};
+use strata_asm_common::{AsmManifest, AsmManifestHash, AuxData, MMR_SENTINEL_DUMMY_LEAF};
 use strata_btc_types::{BitcoinTxid, RawBitcoinTx};
-use strata_identifiers::{Buf32, Hash, L1BlockCommitment, L1BlockId};
+use strata_identifiers::{L1BlockCommitment, L1BlockId};
 use strata_merkle::MerkleProofB32;
 
 use crate::{AsmState, WorkerResult};
@@ -65,7 +65,7 @@ pub trait ManifestMmrStore {
     /// Implementations must reject a `height` that does not match the next
     /// append position, since that signals a gap or out-of-order processing
     /// that would corrupt the height-to-index alignment.
-    fn put_manifest_hash(&self, height: u64, hash: Hash) -> WorkerResult<()>;
+    fn put_manifest_hash(&self, height: u64, hash: AsmManifestHash) -> WorkerResult<()>;
 
     /// Prefills the manifest MMR with sentinel leaves so that real manifests
     /// land at a leaf index equal to their L1 block height.
@@ -81,7 +81,7 @@ pub trait ManifestMmrStore {
     /// MMR already holds `genesis_height + 1` entries, so it is safe to run on
     /// every restart.
     fn prefill_manifest_mmr(&self, genesis_height: u64) -> WorkerResult<()> {
-        let sentinel = Buf32::new(MMR_SENTINEL_DUMMY_LEAF);
+        let sentinel = AsmManifestHash::from(MMR_SENTINEL_DUMMY_LEAF);
         for height in self.manifest_mmr_leaf_count()?..=genesis_height {
             self.put_manifest_hash(height, sentinel)?;
         }
@@ -97,7 +97,7 @@ pub trait ManifestMmrStore {
     /// implement those primitives, not this.
     fn record_manifest(&self, manifest: AsmManifest) -> WorkerResult<()> {
         let height = u64::from(manifest.height());
-        let hash: Hash = manifest.compute_hash().into();
+        let hash = manifest.compute_hash();
         self.put_manifest(manifest)?;
         self.put_manifest_hash(height, hash)
     }
@@ -124,7 +124,7 @@ pub trait ManifestMmrStore {
     /// Retrieves a manifest hash by its MMR leaf index.
     ///
     /// Reads the hash directly from the MMR structure.
-    fn get_manifest_hash(&self, index: u64) -> WorkerResult<Option<Hash>>;
+    fn get_manifest_hash(&self, index: u64) -> WorkerResult<Option<AsmManifestHash>>;
 }
 
 /// Persists and loads per-block auxiliary data for the prover.

@@ -24,7 +24,6 @@ use strata_asm_common::{
     AsmMerkleProof, AuxData, AuxRequests, BitcoinTxid, ManifestHashRange, RawBitcoinTx,
     VerifiableManifestHash,
 };
-use strata_asm_manifest_types::AsmManifestHash;
 use tracing::*;
 
 use crate::{L1BlockProvider, ManifestMmrStore, WorkerError, WorkerResult};
@@ -184,10 +183,9 @@ impl<'a, C: ?Sized + L1BlockProvider + ManifestMmrStore> AuxDataResolver<'a, C> 
             // L1 block height == MMR leaf index (height-indexed MMR).
             for mmr_index in start_height..=end_height {
                 // Fetch manifest hash from storage
-                let manifest_hash: [u8; 32] = self
+                let hash = self
                     .context
                     .get_manifest_hash(mmr_index)?
-                    .map(|x| x.0)
                     .ok_or(WorkerError::ManifestHashNotFound { index: mmr_index })?;
 
                 // Generate MMR proof for this index
@@ -201,7 +199,6 @@ impl<'a, C: ?Sized + L1BlockProvider + ManifestMmrStore> AuxDataResolver<'a, C> 
                 let index = proof_b32.index();
                 let asm_proof = AsmMerkleProof::from_cohashes(cohashes, index);
 
-                let hash = AsmManifestHash::from(manifest_hash);
                 resolved.push(VerifiableManifestHash::new(hash, asm_proof));
 
                 trace!(index = mmr_index, "Resolved manifest hash with proof");

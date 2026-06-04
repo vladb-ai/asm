@@ -56,7 +56,7 @@ use strata_asm_worker::{
     AnchorStateStore, AsmState, AsmWorkerBuilder, AsmWorkerHandle, ManifestMmrStore,
 };
 use strata_btc_types::BlockHashExt;
-use strata_identifiers::{Buf32, L1BlockCommitment};
+use strata_identifiers::L1BlockCommitment;
 use strata_l1_envelope_fmt::builder::{build_envelope_script, EnvelopeScriptBuilder};
 use strata_l1_txfmt::{ParseConfig, TagData};
 use strata_tasks::{TaskExecutor, TaskManager};
@@ -283,7 +283,10 @@ impl AsmTestHarness {
     }
 
     /// Get a manifest hash by leaf index.
-    pub fn get_manifest_hash(&self, index: u64) -> anyhow::Result<Option<Buf32>> {
+    pub fn get_manifest_hash(
+        &self,
+        index: u64,
+    ) -> anyhow::Result<Option<strata_asm_manifest_types::AsmManifestHash>> {
         Ok(self.context.get_manifest_hash(index)?)
     }
 
