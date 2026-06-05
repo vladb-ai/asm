@@ -10,19 +10,23 @@ use std::{
 
 use bitcoin::{block::Header, params::Params, Block, BlockHash, Network, Txid};
 use bitcoind_async_client::{traits::Reader, Client};
-use strata_asm_manifest_types::AsmManifest;
-use strata_asm_worker::{AsmState, WorkerContext, WorkerError, WorkerResult};
+use strata_asm_manifest_types::{AsmManifest, AsmManifestHash};
+use strata_asm_worker::{
+    AnchorStateStore, AsmState, AuxDataStore, L1DataProvider, ManifestMmrStore, WorkerError,
+    WorkerResult,
+};
 use strata_btc_types::{BitcoinTxid, BlockHashExt, L1BlockIdBitcoinExt, RawBitcoinTx};
 use strata_btc_verification::{get_relative_difficulty_adjustment_height, L1Anchor};
-use strata_identifiers::{Buf32, Hash, L1BlockCommitment, L1BlockId};
-use strata_merkle::{MerkleProofB32, Mmr, Mmr64B32, MmrState, Sha256Hasher};
+use strata_identifiers::{L1BlockCommitment, L1BlockId};
+use strata_merkle::{MerkleProofB32, Sha256Hasher};
+use strata_merkle_node_store::{MemMmr, StoredMmr};
 use tokio::{runtime::Handle, task::block_in_place};
 
 /// Shared mutable state for the test worker context.
 ///
 /// Consolidating these fields lets us hold a single `Arc<Mutex<_>>` instead of
-/// one per field, and keeps related invariants (mmr leaves + prefill count,
-/// manifests in insertion order) close together.
+/// one per field, and keeps related state (the manifest MMR, manifests in
+/// insertion order) close together.
 #[derive(Debug, Default)]
 pub struct TestWorkerStateInner {
     /// Block cache (optional - fetches from client if not cached)
@@ -31,11 +35,11 @@ pub struct TestWorkerStateInner {
     pub asm_states: HashMap<L1BlockCommitment, AsmState>,
     /// Latest ASM state
     pub latest_asm_state: Option<(L1BlockCommitment, AsmState)>,
-    /// In-memory MMR leaves in insertion order.
-    pub mmr_leaves: Vec<[u8; 32]>,
-    /// Number of leading sentinel-prefill entries in `mmr_leaves`. Indices
-    /// `0..mmr_prefill_count` are not real manifests.
-    pub mmr_prefill_count: u64,
+    /// Height-indexed manifest-hash MMR. A full node store, so inclusion proofs
+    /// come straight from stored nodes in `O(log n)`. The leading entries are
+    /// sentinel-prefill for L1 heights up to genesis; real manifest hashes
+    /// follow.
+    pub manifest_mmr: MemMmr<[u8; 32]>,
     /// Stored manifests in insertion order
     pub manifests: Vec<AsmManifest>,
 }
@@ -68,16 +72,23 @@ impl TestAsmWorkerContext {
         }
     }
 
-    /// Prefill the in-memory MMR with sentinel leaves up to `target_count`,
-    /// mirroring the proven MMR's genesis prefill so DB-side leaf indices
-    /// equal L1 block heights.
-    pub fn prefill_mmr(&self, target_count: u64) {
-        let sentinel = strata_asm_common::MMR_SENTINEL_DUMMY_LEAF;
-        let mut inner = self.inner.lock().unwrap();
-        for _ in inner.mmr_leaves.len() as u64..target_count {
-            inner.mmr_leaves.push(sentinel);
-        }
-        inner.mmr_prefill_count = target_count.max(inner.mmr_prefill_count);
+    /// Number of leaves in the manifest MMR (sentinels + real manifest hashes).
+    pub fn mmr_leaf_count(&self) -> u64 {
+        let inner = self.inner.lock().unwrap();
+        StoredMmr::<Sha256Hasher>::leaf_count(&inner.manifest_mmr).unwrap()
+    }
+
+    /// Snapshot of every manifest-MMR leaf in index order.
+    pub fn mmr_leaves(&self) -> Vec<[u8; 32]> {
+        let inner = self.inner.lock().unwrap();
+        let count = StoredMmr::<Sha256Hasher>::leaf_count(&inner.manifest_mmr).unwrap();
+        (0..count)
+            .map(|i| {
+                StoredMmr::<Sha256Hasher>::get_leaf(&inner.manifest_mmr, i)
+                    .unwrap()
+                    .expect("leaf below count is present")
+            })
+            .collect()
     }
 
     /// Fetch a block from regtest by hash, caching it for future use
@@ -93,7 +104,7 @@ impl TestAsmWorkerContext {
     }
 }
 
-impl WorkerContext for TestAsmWorkerContext {
+impl L1DataProvider for TestAsmWorkerContext {
     fn get_l1_block(&self, blockid: &L1BlockId) -> WorkerResult<Block> {
         // Try cache first
         if let Some(block) = self.inner.lock().unwrap().block_cache.get(blockid).cloned() {
@@ -126,6 +137,28 @@ impl WorkerContext for TestAsmWorkerContext {
         Ok(block)
     }
 
+    fn get_network(&self) -> WorkerResult<Network> {
+        Ok(Network::Regtest)
+    }
+
+    fn get_bitcoin_tx(&self, txid: &BitcoinTxid) -> WorkerResult<RawBitcoinTx> {
+        let txid_inner: Txid = (*txid).into();
+
+        // See `get_l1_block` for the two-context branching rationale.
+        let client = self.client.clone();
+        let fetch = || async move { client.get_raw_transaction_verbosity_zero(&txid_inner).await };
+        let raw_tx_result = if Handle::try_current().is_ok() {
+            block_in_place(|| self.tokio_handle.block_on(fetch()))
+        } else {
+            self.tokio_handle.block_on(fetch())
+        }
+        .map_err(|_| WorkerError::BitcoinTxNotFound(*txid))?;
+
+        Ok(RawBitcoinTx::from(raw_tx_result.0))
+    }
+}
+
+impl AnchorStateStore for TestAsmWorkerContext {
     fn get_anchor_state(&self, blockid: &L1BlockCommitment) -> WorkerResult<AsmState> {
         self.inner
             .lock()
@@ -150,118 +183,56 @@ impl WorkerContext for TestAsmWorkerContext {
         inner.latest_asm_state = Some((*blockid, state.clone()));
         Ok(())
     }
+}
 
-    fn get_network(&self) -> WorkerResult<Network> {
-        Ok(Network::Regtest)
+impl ManifestMmrStore for TestAsmWorkerContext {
+    fn put_manifest(&self, manifest: AsmManifest) -> WorkerResult<()> {
+        self.inner.lock().unwrap().manifests.push(manifest);
+        Ok(())
     }
 
-    fn get_bitcoin_tx(&self, txid: &BitcoinTxid) -> WorkerResult<RawBitcoinTx> {
-        let txid_inner: Txid = (*txid).into();
-
-        // See `get_l1_block` for the two-context branching rationale.
-        let client = self.client.clone();
-        let fetch = || async move { client.get_raw_transaction_verbosity_zero(&txid_inner).await };
-        let raw_tx_result = if Handle::try_current().is_ok() {
-            block_in_place(|| self.tokio_handle.block_on(fetch()))
-        } else {
-            self.tokio_handle.block_on(fetch())
+    fn put_manifest_hash(&self, height: u64, hash: AsmManifestHash) -> WorkerResult<()> {
+        let inner = self.inner.lock().unwrap();
+        let index = StoredMmr::<Sha256Hasher>::leaf_count(&inner.manifest_mmr)
+            .map_err(|_| WorkerError::DbError)?;
+        if index != height {
+            return Err(WorkerError::ManifestMmrMisaligned { height, index });
         }
-        .map_err(|_| WorkerError::BitcoinTxNotFound(*txid))?;
-
-        Ok(RawBitcoinTx::from(raw_tx_result.0))
+        StoredMmr::<Sha256Hasher>::append_leaf(&inner.manifest_mmr, *hash.as_ref())
+            .map_err(|_| WorkerError::DbError)?;
+        Ok(())
     }
 
-    fn append_manifest_to_mmr(&self, manifest_hash: Hash) -> WorkerResult<u64> {
-        let hash_bytes: [u8; 32] = *manifest_hash.as_ref();
-        let mut inner = self.inner.lock().unwrap();
-        let leaf_index = inner.mmr_leaves.len() as u64;
-        inner.mmr_leaves.push(hash_bytes);
-        Ok(leaf_index)
+    fn manifest_mmr_leaf_count(&self) -> WorkerResult<u64> {
+        let inner = self.inner.lock().unwrap();
+        StoredMmr::<Sha256Hasher>::leaf_count(&inner.manifest_mmr).map_err(|_| WorkerError::DbError)
     }
 
     fn generate_mmr_proof_at(
         &self,
         index: u64,
         at_leaf_count: u64,
-    ) -> WorkerResult<strata_merkle::MerkleProofB32> {
+    ) -> WorkerResult<MerkleProofB32> {
         let inner = self.inner.lock().unwrap();
-        if index >= at_leaf_count || at_leaf_count > inner.mmr_leaves.len() as u64 {
-            return Err(WorkerError::MmrProofFailed { index });
-        }
-
-        // The MMR is height-indexed: positions `0..prefill_count` hold the
-        // sentinel `MMR_PREFILL_LEAF`. Materialise the prefilled compact MMR
-        // in O(log N) via `new_repeated`, then iterate only over real leaves
-        // and track a single proof — the one for `index` — through subsequent
-        // appends. We can't pre-populate proofs for prefill positions because
-        // `new_repeated` doesn't expose per-leaf proofs; if `index` happens to
-        // fall in the prefill range we walk the prefill manually instead.
-        let prefill_count = inner.mmr_prefill_count.min(at_leaf_count);
-        let (mut compact, walk_prefill_proofs) = if index < prefill_count {
-            (Mmr64B32::new_empty(), true)
-        } else {
-            let compact = <Mmr64B32 as Mmr<Sha256Hasher>>::new_repeated(
-                strata_asm_common::MMR_SENTINEL_DUMMY_LEAF,
-                prefill_count,
-            );
-            (compact, false)
-        };
-
-        let mut proof_list: Vec<strata_merkle::MerkleProof<[u8; 32]>> = Vec::new();
-
-        if walk_prefill_proofs {
-            for i in 0..prefill_count {
-                let leaf = strata_asm_common::MMR_SENTINEL_DUMMY_LEAF;
-                let proof = Mmr::<Sha256Hasher>::add_leaf_updating_proof_list(
-                    &mut compact,
-                    leaf,
-                    &mut proof_list,
-                )
-                .map_err(|_| WorkerError::MmrProofFailed { index })?;
-                if i == index {
-                    proof_list.push(proof);
-                }
-            }
-        }
-
-        for cur in prefill_count..at_leaf_count {
-            let leaf = inner.mmr_leaves[cur as usize];
-            let proof = Mmr::<Sha256Hasher>::add_leaf_updating_proof_list(
-                &mut compact,
-                leaf,
-                &mut proof_list,
-            )
-            .map_err(|_| WorkerError::MmrProofFailed { index })?;
-            if cur == index {
-                proof_list.push(proof);
-            }
-        }
-
-        // `proof_list` holds exactly one tracked proof — the one for `index` —
-        // and `add_leaf_updating_proof_list` keeps it current through every
-        // append performed after we inserted it.
-        proof_list
-            .first()
-            .map(MerkleProofB32::from_generic)
-            .ok_or(WorkerError::MmrProofFailed { index })
+        let proof = StoredMmr::<Sha256Hasher>::generate_proof_at_size(
+            &inner.manifest_mmr,
+            index,
+            at_leaf_count,
+        )
+        .map_err(|_| WorkerError::MmrProofFailed { index })?;
+        Ok(MerkleProofB32::from_generic(&proof))
     }
 
-    fn get_manifest_hash(&self, index: u64) -> WorkerResult<Option<Hash>> {
-        Ok(self
-            .inner
-            .lock()
-            .unwrap()
-            .mmr_leaves
-            .get(index as usize)
-            .copied()
-            .map(Buf32::from))
+    fn get_manifest_hash(&self, index: u64) -> WorkerResult<AsmManifestHash> {
+        let inner = self.inner.lock().unwrap();
+        StoredMmr::<Sha256Hasher>::get_leaf(&inner.manifest_mmr, index)
+            .map_err(|_| WorkerError::DbError)?
+            .map(AsmManifestHash::from)
+            .ok_or(WorkerError::ManifestHashNotFound { index })
     }
+}
 
-    fn store_l1_manifest(&self, manifest: AsmManifest) -> WorkerResult<()> {
-        self.inner.lock().unwrap().manifests.push(manifest);
-        Ok(())
-    }
-
+impl AuxDataStore for TestAsmWorkerContext {
     fn store_aux_data(
         &self,
         _blockid: &L1BlockCommitment,
@@ -272,9 +243,9 @@ impl WorkerContext for TestAsmWorkerContext {
 
     fn get_aux_data(
         &self,
-        _blockid: &L1BlockCommitment,
-    ) -> WorkerResult<Option<strata_asm_common::AuxData>> {
-        Ok(None)
+        blockid: &L1BlockCommitment,
+    ) -> WorkerResult<strata_asm_common::AuxData> {
+        Err(WorkerError::MissingAuxData(*blockid))
     }
 }
 

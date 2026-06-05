@@ -52,9 +52,11 @@ use corepc_node::Node;
 use rand::RngCore;
 use strata_asm_params::{AdministrationInitConfig, AsmParams, SubprotocolInstance};
 use strata_asm_spec::StrataAsmSpec;
-use strata_asm_worker::{AsmState, AsmWorkerBuilder, AsmWorkerHandle, WorkerContext};
+use strata_asm_worker::{
+    AnchorStateStore, AsmState, AsmWorkerBuilder, AsmWorkerHandle, ManifestMmrStore,
+};
 use strata_btc_types::BlockHashExt;
-use strata_identifiers::{Buf32, L1BlockCommitment};
+use strata_identifiers::L1BlockCommitment;
 use strata_l1_envelope_fmt::builder::{build_envelope_script, EnvelopeScriptBuilder};
 use strata_l1_txfmt::{ParseConfig, TagData};
 use strata_tasks::{TaskExecutor, TaskManager};
@@ -277,11 +279,14 @@ impl AsmTestHarness {
 
     /// Get the number of MMR leaves (manifest hashes) stored.
     pub fn get_mmr_leaf_count(&self) -> usize {
-        self.context.inner.lock().unwrap().mmr_leaves.len()
+        self.context.mmr_leaf_count() as usize
     }
 
     /// Get a manifest hash by leaf index.
-    pub fn get_manifest_hash(&self, index: u64) -> anyhow::Result<Option<Buf32>> {
+    pub fn get_manifest_hash(
+        &self,
+        index: u64,
+    ) -> anyhow::Result<strata_asm_manifest_types::AsmManifestHash> {
         Ok(self.context.get_manifest_hash(index)?)
     }
 
@@ -292,7 +297,7 @@ impl AsmTestHarness {
 
     /// Get all MMR leaf hashes in leaf-index order.
     pub fn get_mmr_leaves(&self) -> Vec<[u8; 32]> {
-        self.context.inner.lock().unwrap().mmr_leaves.clone()
+        self.context.mmr_leaves()
     }
 
     // Funding & Wallet
@@ -693,12 +698,12 @@ impl AsmTestHarnessBuilder {
         }
         let asm_params = Arc::new(asm_params);
 
-        // 5. Create worker context. The MMR is height-indexed: prefill it with
-        // sentinel leaves for L1 heights `0..=genesis_height`, matching the
+        // 5. Create worker context. The worker prefills the height-indexed MMR
+        // with sentinel leaves for L1 heights `0..=genesis_height` during
+        // startup (`ManifestMmrStore::prefill_manifest_mmr`), matching the
         // proven (in-state) MMR's genesis prefill so external leaf indices
         // equal L1 block heights.
         let context = TestAsmWorkerContext::new((*client).clone());
-        context.prefill_mmr(genesis_height + 1);
 
         // 6. Create task executor
         let task_manager = TaskManager::new(Handle::current());

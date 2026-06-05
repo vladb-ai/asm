@@ -2,12 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bitcoind_async_client::{Auth, Client};
-use strata_asm_common::MMR_SENTINEL_DUMMY_LEAF;
 use strata_asm_params::AsmParams;
 use strata_asm_proof_db::{SledMohoStateDb, SledProofDb};
 use strata_asm_spec::StrataAsmSpec;
 use strata_asm_worker::AsmWorkerBuilder;
-use strata_identifiers::Buf32;
 use strata_tasks::TaskExecutor;
 use tokio::{
     runtime::{Builder as RuntimeBuilder, Handle},
@@ -56,12 +54,9 @@ pub(crate) async fn bootstrap(
     let export_entries_for_worker = orch_prep.as_ref().map(|_| export_entries_db.clone());
     let genesis_height = params.anchor.block.height() as u64;
 
-    // Align the DB-side ASM manifest MMR with the in-memory (proven) MMR:
-    // both are height-indexed and prefilled with sentinel leaves up to and
-    // including `genesis_height`, so that the manifest for height `h` lands
-    // at leaf index `h`. Idempotent — no-op on restart.
-    mmr_db.prefill_to(genesis_height + 1, Buf32::new(MMR_SENTINEL_DUMMY_LEAF))?;
-
+    // The worker aligns the DB-side ASM manifest MMR with L1 heights during
+    // startup (`ManifestMmrStore::prefill_manifest_mmr`), so no prefill is
+    // needed here.
     let worker_context = AsmWorkerContext::new(
         runtime_handle.clone(),
         bitcoin_client.clone(),

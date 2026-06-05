@@ -1,5 +1,5 @@
 use strata_btc_types::BitcoinTxid;
-use strata_identifiers::L1BlockId;
+use strata_identifiers::{L1BlockCommitment, L1BlockId};
 use thiserror::Error;
 
 /// Return type for worker messages.
@@ -18,6 +18,9 @@ pub enum WorkerError {
 
     #[error("missing ASM state for the block {0:?}")]
     MissingAsmState(L1BlockId),
+
+    #[error("missing aux data for the block {0:?}")]
+    MissingAuxData(L1BlockCommitment),
 
     /// A Bitcoin RPC call failed after exhausting its retry budget. The
     /// payload carries the underlying error's display so the operator sees
@@ -56,6 +59,9 @@ pub enum WorkerError {
 
     #[error("MMR proof generation failed for index {index}")]
     MmrProofFailed { index: u64 },
+
+    #[error("manifest MMR misaligned: leaf for height {height} would land at index {index}")]
+    ManifestMmrMisaligned { height: u64, index: u64 },
 
     #[error("Manifest hash out of bound (max {max}, requested {index})")]
     ManifestIndexOutOfBound { index: u64, max: u64 },

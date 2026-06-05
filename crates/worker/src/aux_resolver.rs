@@ -24,10 +24,9 @@ use strata_asm_common::{
     AsmMerkleProof, AuxData, AuxRequests, BitcoinTxid, ManifestHashRange, RawBitcoinTx,
     VerifiableManifestHash,
 };
-use strata_asm_manifest_types::AsmManifestHash;
 use tracing::*;
 
-use crate::{WorkerContext, WorkerError, WorkerResult};
+use crate::{L1DataProvider, ManifestMmrStore, WorkerResult};
 
 /// Auxiliary data resolver that fetches external data required by subprotocols.
 ///
@@ -38,21 +37,25 @@ use crate::{WorkerContext, WorkerError, WorkerResult};
 /// Both resolution types are fully implemented:
 /// - Bitcoin transaction fetching via Bitcoin RPC (requires txindex=1)
 /// - MMR proof generation using AsmDBSled for on-demand proof generation
-pub struct AuxDataResolver<'a> {
-    /// Worker context for accessing ASM state and MMR database
-    context: &'a dyn WorkerContext,
+///
+/// Depends only on the two worker-context concerns it actually touches —
+/// [`L1DataProvider`] (transaction fetch) and [`ManifestMmrStore`] (manifest
+/// hashes + proofs) — rather than the full `WorkerContext`.
+pub struct AuxDataResolver<'a, C: ?Sized + L1DataProvider + ManifestMmrStore> {
+    /// Worker context for accessing Bitcoin transactions and the MMR database.
+    context: &'a C,
     /// Leaf count at which manifest proofs should be generated.
     at_leaf_count: u64,
 }
 
-impl<'a> AuxDataResolver<'a> {
+impl<'a, C: ?Sized + L1DataProvider + ManifestMmrStore> AuxDataResolver<'a, C> {
     /// Creates a new auxiliary data resolver.
     ///
     /// # Arguments
     ///
-    /// * `context` - Worker context for ASM state access and MMR database
+    /// * `context` - Worker context for Bitcoin transaction access and MMR database
     /// * `at_leaf_count` - MMR leaf count snapshot for proof generation
-    pub fn new(context: &'a dyn WorkerContext, at_leaf_count: u64) -> Self {
+    pub fn new(context: &'a C, at_leaf_count: u64) -> Self {
         Self {
             context,
             at_leaf_count,
@@ -180,11 +183,7 @@ impl<'a> AuxDataResolver<'a> {
             // L1 block height == MMR leaf index (height-indexed MMR).
             for mmr_index in start_height..=end_height {
                 // Fetch manifest hash from storage
-                let manifest_hash: [u8; 32] = self
-                    .context
-                    .get_manifest_hash(mmr_index)?
-                    .map(|x| x.0)
-                    .ok_or(WorkerError::ManifestHashNotFound { index: mmr_index })?;
+                let hash = self.context.get_manifest_hash(mmr_index)?;
 
                 // Generate MMR proof for this index
                 let proof_b32 = self
@@ -197,7 +196,6 @@ impl<'a> AuxDataResolver<'a> {
                 let index = proof_b32.index();
                 let asm_proof = AsmMerkleProof::from_cohashes(cohashes, index);
 
-                let hash = AsmManifestHash::from(manifest_hash);
                 resolved.push(VerifiableManifestHash::new(hash, asm_proof));
 
                 trace!(index = mmr_index, "Resolved manifest hash with proof");
@@ -213,7 +211,7 @@ impl<'a> AuxDataResolver<'a> {
     }
 }
 
-impl<'a> fmt::Debug for AuxDataResolver<'a> {
+impl<'a, C: ?Sized + L1DataProvider + ManifestMmrStore> fmt::Debug for AuxDataResolver<'a, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AuxDataResolver")
             .field("at_leaf_count", &self.at_leaf_count)

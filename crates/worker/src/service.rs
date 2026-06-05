@@ -139,15 +139,10 @@ where
         let storage_span = debug_span!("asm.manifest_storage");
         let _storage_guard = storage_span.enter();
 
-        // Extract manifest and compute its hash
-        let manifest = asm_stf_out.manifest.clone();
-        let manifest_hash = manifest.compute_hash();
-
-        // Store manifest to L1 database (for chaintsn and other consumers)
-        state.context.store_l1_manifest(manifest)?;
-
-        // Append manifest hash to MMR database
-        let leaf_index = state.context.append_manifest_to_mmr(manifest_hash.into())?;
+        // Persist the manifest and record its hash in the height-indexed MMR.
+        state
+            .context
+            .record_manifest(asm_stf_out.manifest.clone())?;
 
         // Store auxiliary data for prover consumption
         state.context.store_aux_data(block_id, &aux_data)?;
@@ -157,7 +152,7 @@ where
         state.context.store_anchor_state(block_id, &new_state)?;
         state.update_anchor_state(new_state, *block_id);
 
-        info!(%block_id, %height, leaf_index, "ASM transition complete, manifest and state stored");
+        info!(%block_id, %height, "ASM transition complete, manifest and state stored");
     } // transition_span drops here
 
     Ok(())
