@@ -1,7 +1,7 @@
 //! Worker-context trait implementations for the ASM runner.
 //!
 //! Implements the four [`WorkerContext`](strata_asm_worker::WorkerContext)
-//! concern traits ([`L1BlockProvider`], [`AnchorStateStore`],
+//! concern traits ([`L1DataProvider`], [`AnchorStateStore`],
 //! [`ManifestMmrStore`], [`AuxDataStore`]) for [`AsmWorkerContext`].
 //!
 //! # Moho extension
@@ -29,7 +29,7 @@ use strata_asm_proof_impl::moho_program::program::{
     AsmStfProgram, advance_export_state_with_logs, extract_next_predicate_from_logs,
 };
 use strata_asm_worker::{
-    AnchorStateStore, AsmState, AuxDataStore, L1BlockProvider, ManifestMmrStore, WorkerError,
+    AnchorStateStore, AsmState, AuxDataStore, L1DataProvider, ManifestMmrStore, WorkerError,
     WorkerResult,
 };
 use strata_btc_types::{BitcoinTxid, BlockHashExt, L1BlockIdBitcoinExt, RawBitcoinTx};
@@ -138,7 +138,7 @@ impl AsmWorkerContext {
     }
 }
 
-impl L1BlockProvider for AsmWorkerContext {
+impl L1DataProvider for AsmWorkerContext {
     fn get_l1_block(&self, blockid: &L1BlockId) -> WorkerResult<Block> {
         let block_hash: BlockHash = blockid.to_block_hash();
         let client = &self.bitcoin_client;

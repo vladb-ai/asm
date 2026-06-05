@@ -13,7 +13,7 @@ use harness::{
     worker_context::TestAsmWorkerContext,
 };
 use integration_tests::harness;
-use strata_asm_worker::{AnchorStateStore, L1BlockProvider};
+use strata_asm_worker::{AnchorStateStore, L1DataProvider};
 use strata_btc_types::BlockHashExt;
 use strata_test_utils_btcio::{get_bitcoind_and_client, mine_blocks};
 

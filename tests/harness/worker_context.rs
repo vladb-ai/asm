@@ -12,7 +12,7 @@ use bitcoin::{block::Header, params::Params, Block, BlockHash, Network, Txid};
 use bitcoind_async_client::{traits::Reader, Client};
 use strata_asm_manifest_types::{AsmManifest, AsmManifestHash};
 use strata_asm_worker::{
-    AnchorStateStore, AsmState, AuxDataStore, L1BlockProvider, ManifestMmrStore, WorkerError,
+    AnchorStateStore, AsmState, AuxDataStore, L1DataProvider, ManifestMmrStore, WorkerError,
     WorkerResult,
 };
 use strata_btc_types::{BitcoinTxid, BlockHashExt, L1BlockIdBitcoinExt, RawBitcoinTx};
@@ -104,7 +104,7 @@ impl TestAsmWorkerContext {
     }
 }
 
-impl L1BlockProvider for TestAsmWorkerContext {
+impl L1DataProvider for TestAsmWorkerContext {
     fn get_l1_block(&self, blockid: &L1BlockId) -> WorkerResult<Block> {
         // Try cache first
         if let Some(block) = self.inner.lock().unwrap().block_cache.get(blockid).cloned() {

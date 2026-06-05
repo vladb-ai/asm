@@ -26,7 +26,7 @@ use strata_asm_common::{
 };
 use tracing::*;
 
-use crate::{L1BlockProvider, ManifestMmrStore, WorkerResult};
+use crate::{L1DataProvider, ManifestMmrStore, WorkerResult};
 
 /// Auxiliary data resolver that fetches external data required by subprotocols.
 ///
@@ -39,16 +39,16 @@ use crate::{L1BlockProvider, ManifestMmrStore, WorkerResult};
 /// - MMR proof generation using AsmDBSled for on-demand proof generation
 ///
 /// Depends only on the two worker-context concerns it actually touches —
-/// [`L1BlockProvider`] (transaction fetch) and [`ManifestMmrStore`] (manifest
+/// [`L1DataProvider`] (transaction fetch) and [`ManifestMmrStore`] (manifest
 /// hashes + proofs) — rather than the full `WorkerContext`.
-pub struct AuxDataResolver<'a, C: ?Sized + L1BlockProvider + ManifestMmrStore> {
+pub struct AuxDataResolver<'a, C: ?Sized + L1DataProvider + ManifestMmrStore> {
     /// Worker context for accessing Bitcoin transactions and the MMR database.
     context: &'a C,
     /// Leaf count at which manifest proofs should be generated.
     at_leaf_count: u64,
 }
 
-impl<'a, C: ?Sized + L1BlockProvider + ManifestMmrStore> AuxDataResolver<'a, C> {
+impl<'a, C: ?Sized + L1DataProvider + ManifestMmrStore> AuxDataResolver<'a, C> {
     /// Creates a new auxiliary data resolver.
     ///
     /// # Arguments
@@ -211,7 +211,7 @@ impl<'a, C: ?Sized + L1BlockProvider + ManifestMmrStore> AuxDataResolver<'a, C> 
     }
 }
 
-impl<'a, C: ?Sized + L1BlockProvider + ManifestMmrStore> fmt::Debug for AuxDataResolver<'a, C> {
+impl<'a, C: ?Sized + L1DataProvider + ManifestMmrStore> fmt::Debug for AuxDataResolver<'a, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AuxDataResolver")
             .field("at_leaf_count", &self.at_leaf_count)

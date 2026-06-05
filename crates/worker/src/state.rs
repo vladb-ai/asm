@@ -164,7 +164,7 @@ mod tests {
     use strata_test_utils_btcio::{get_bitcoind_and_client, mine_blocks};
 
     use super::*;
-    use crate::{AnchorStateStore, AuxDataStore, L1BlockProvider, ManifestMmrStore};
+    use crate::{AnchorStateStore, AuxDataStore, L1DataProvider, ManifestMmrStore};
 
     struct TestEnv {
         pub _node: Node, // Keep node alive
@@ -243,7 +243,7 @@ mod tests {
         }
     }
 
-    impl L1BlockProvider for MockWorkerContext {
+    impl L1DataProvider for MockWorkerContext {
         fn get_l1_block(&self, blockid: &L1BlockId) -> WorkerResult<Block> {
             self.blocks
                 .lock()

@@ -3,7 +3,7 @@
 //! The worker's dependencies split into four concerns, each backed by a
 //! distinct subsystem in production:
 //!
-//! - [`L1BlockProvider`] — reads L1 data from the Bitcoin node (blocks, txs, network).
+//! - [`L1DataProvider`] — reads L1 data from the Bitcoin node (blocks, txs, network).
 //! - [`AnchorStateStore`] — persists and loads [`AsmState`].
 //! - [`ManifestMmrStore`] — manifest persistence and the manifest-hash MMR.
 //! - [`AuxDataStore`] — per-block [`AuxData`] for prover consumption.
@@ -22,7 +22,7 @@ use strata_merkle::MerkleProofB32;
 use crate::{AsmState, WorkerResult};
 
 /// Reads L1 data from the backing Bitcoin source.
-pub trait L1BlockProvider {
+pub trait L1DataProvider {
     /// Fetches a Bitcoin [`Block`] at a given height.
     fn get_l1_block(&self, blockid: &L1BlockId) -> WorkerResult<Block>;
 
@@ -143,16 +143,16 @@ pub trait AuxDataStore {
 
 /// Context trait for a worker to interact with the database and Bitcoin Client.
 ///
-/// Umbrella over the four concern traits ([`L1BlockProvider`],
+/// Umbrella over the four concern traits ([`L1DataProvider`],
 /// [`AnchorStateStore`], [`ManifestMmrStore`], [`AuxDataStore`]). The blanket
 /// impl means any type that implements all four automatically implements
 /// `WorkerContext`, so implementors never name it directly.
 pub trait WorkerContext:
-    L1BlockProvider + AnchorStateStore + ManifestMmrStore + AuxDataStore
+    L1DataProvider + AnchorStateStore + ManifestMmrStore + AuxDataStore
 {
 }
 
 impl<T> WorkerContext for T where
-    T: L1BlockProvider + AnchorStateStore + ManifestMmrStore + AuxDataStore
+    T: L1DataProvider + AnchorStateStore + ManifestMmrStore + AuxDataStore
 {
 }
