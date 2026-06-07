@@ -37,10 +37,19 @@ jobs:
       - name: Install protoc
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
 
+      # `--all-features` pulls in `sp1-core-executor-runner`, whose build.rs
+      # embeds a nested-built helper that breaks clippy on a cache hit; the
+      # action pre-builds it and returns the path to use as the override (see the
+      # action for why).
+      - name: Pre-build SP1 core runner binary
+        id: sp1-runner
+        uses: ./.github/actions/prebuild-sp1-runner
+
       - name: Run clippy
         run: cargo clippy --examples --tests --benches --all-features --all-targets --locked
         env:
           RUSTFLAGS: -D warnings
+          SP1_CORE_RUNNER_OVERRIDE_BINARY: ${{ steps.sp1-runner.outputs.override-binary }}
 
   fmt:
     name: Check code formatting
