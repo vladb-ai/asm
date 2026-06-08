@@ -13,7 +13,7 @@
 //! `WorkerContext` for free; consumers that only need one concern can depend on
 //! the narrower trait instead of the whole context.
 
-use bitcoin::{Block, Network};
+use bitcoin::{Block, Network, block::Header};
 use strata_asm_common::{AsmManifest, AsmManifestHash, AuxData, MMR_SENTINEL_DUMMY_LEAF};
 use strata_btc_types::{BitcoinTxid, RawBitcoinTx};
 use strata_identifiers::{L1BlockCommitment, L1BlockId};
@@ -25,6 +25,9 @@ use crate::{AsmState, WorkerResult};
 pub trait L1DataProvider {
     /// Fetches a Bitcoin [`Block`] at a given height.
     fn get_l1_block(&self, blockid: &L1BlockId) -> WorkerResult<Block>;
+
+    /// Fetches a Bitcoin block [`Header`], without the block's transactions.
+    fn get_l1_block_header(&self, blockid: &L1BlockId) -> WorkerResult<Header>;
 
     /// Fetches a raw Bitcoin transaction by txid.
     ///
@@ -57,14 +60,23 @@ pub trait ManifestMmrStore {
     /// [`record_manifest`](Self::record_manifest) to do both.
     fn put_manifest(&self, manifest: AsmManifest) -> WorkerResult<()>;
 
-    /// Appends a manifest `hash` to the MMR as the leaf for L1 `height`.
+    /// Writes a manifest `hash` to the MMR as the leaf for L1 `height`.
     ///
     /// The MMR is height-indexed (see
     /// [`prefill_manifest_mmr`](Self::prefill_manifest_mmr)): with the genesis
-    /// prefill in place, the leaf for `height` lands at index `height`.
-    /// Implementations must reject a `height` that does not match the next
-    /// append position, since that signals a gap or out-of-order processing
-    /// that would corrupt the height-to-index alignment.
+    /// prefill in place, the leaf for `height` lands at index `height`. A
+    /// `height` at the current end appends; a `height` below it overwrites the
+    /// existing leaf, which is expected during an L1 reorg that replaces the
+    /// block at an already-seen height. A `height` past the end is rejected,
+    /// since it would leave a gap in the height-to-index mapping.
+    ///
+    /// The worker only ever calls this in forward order: `sync_to_block`
+    /// processes from the base (the most recent ancestor with a stored anchor
+    /// state, i.e. the reorg fork point) through the target block, oldest
+    /// first, so `height` arrives contiguously and never skips ahead. On a
+    /// reorg this overwrites each superseded leaf from the fork point forward
+    /// before any later height is written, so a stale leaf never outlives the
+    /// chain it belonged to.
     fn put_manifest_hash(&self, height: u64, hash: AsmManifestHash) -> WorkerResult<()>;
 
     /// Prefills the manifest MMR with sentinel leaves so that real manifests

@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
-use asm_storage::{AsmStateDb, ExportEntriesDb, MmrDb};
-use bitcoin::{Block, BlockHash, Network};
+use asm_storage::{AsmManifestMmrDb, AsmStateDb, ExportEntriesDb};
+use bitcoin::{Block, BlockHash, Network, block::Header};
 use bitcoind_async_client::{Client, error::ClientError, traits::Reader};
 use moho_runtime_interface::MohoProgram;
 use moho_types::{ExportState, MohoState};
@@ -61,7 +61,7 @@ pub(crate) struct AsmWorkerContext {
     /// Maximum retry attempts per Bitcoin RPC call.
     rpc_max_retries: u16,
     state_db: Arc<AsmStateDb>,
-    mmr_db: Arc<MmrDb>,
+    mmr_db: Arc<AsmManifestMmrDb>,
     export_entries_db: Option<ExportEntriesDb>,
     moho_storage: Option<MohoStorage>,
     /// L1 height of the chain genesis (anchor) block.
@@ -78,7 +78,7 @@ impl AsmWorkerContext {
         bitcoin_client: Arc<Client>,
         retry: &RetryConfig,
         state_db: Arc<AsmStateDb>,
-        mmr_db: Arc<MmrDb>,
+        mmr_db: Arc<AsmManifestMmrDb>,
         export_entries_db: Option<ExportEntriesDb>,
         moho_storage: Option<MohoStorage>,
         genesis_height: u64,
@@ -150,6 +150,21 @@ impl L1DataProvider for AsmWorkerContext {
                 || async { client.get_block(&block_hash).await },
             ))
             .map_err(|e: ClientError| WorkerError::BtcRpc(format!("get_block({block_hash}): {e}")))
+    }
+
+    fn get_l1_block_header(&self, blockid: &L1BlockId) -> WorkerResult<Header> {
+        let block_hash: BlockHash = blockid.to_block_hash();
+        let client = &self.bitcoin_client;
+        self.runtime_handle
+            .block_on(retry_with_backoff_async(
+                "btc_get_block_header",
+                self.rpc_max_retries,
+                &self.rpc_backoff,
+                || async { client.get_block_header(&block_hash).await },
+            ))
+            .map_err(|e: ClientError| {
+                WorkerError::BtcRpc(format!("get_block_header({block_hash}): {e}"))
+            })
     }
 
     fn get_network(&self) -> WorkerResult<Network> {
@@ -242,14 +257,9 @@ impl ManifestMmrStore for AsmWorkerContext {
     }
 
     fn put_manifest_hash(&self, height: u64, hash: AsmManifestHash) -> WorkerResult<()> {
-        let index = self
-            .mmr_db
-            .append_leaf(hash.into())
-            .map_err(|_| WorkerError::DbError)?;
-        if index != height {
-            return Err(WorkerError::ManifestMmrMisaligned { height, index });
-        }
-        Ok(())
+        self.mmr_db
+            .put_leaf(height, hash)
+            .map_err(|_| WorkerError::DbError)
     }
 
     fn manifest_mmr_leaf_count(&self) -> WorkerResult<u64> {
@@ -270,7 +280,6 @@ impl ManifestMmrStore for AsmWorkerContext {
         self.mmr_db
             .get_leaf(index)
             .map_err(|_| WorkerError::DbError)?
-            .map(AsmManifestHash::from)
             .ok_or(WorkerError::ManifestHashNotFound { index })
     }
 }

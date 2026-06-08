@@ -42,14 +42,20 @@ where
     S: AsmSpec + Send + Sync + 'static,
     S::Params: Send + Sync + 'static,
 {
-    // TODO(STR-1928): add tests.
     fn process_input(
         state: &mut AsmWorkerServiceState<W, S>,
         input: AsmWorkerMessage,
     ) -> anyhow::Result<Response> {
         match input {
-            AsmWorkerMessage::SubmitBlock(incoming_block, completion) => {
-                let result = process_block(state, &incoming_block);
+            AsmWorkerMessage::SubmitBlock(target, completion) => {
+                let result = sync_to_block(state, &target);
+                if let Err(err) = &result {
+                    // A sync error is fatal: the worker exits below. Log it here
+                    // so the shutdown reason lands in the worker's own log, not
+                    // only in the caller's completion result (which may be
+                    // awaited on another task).
+                    error!(%target, %err, "ASM sync failed; shutting down worker");
+                }
                 let should_exit = result.is_err();
                 completion.send_blocking(result);
                 if should_exit {
@@ -61,72 +67,103 @@ where
     }
 }
 
-/// Processes an L1 block through the ASM state transition.
-fn process_block<W, S>(
+/// Synchronizes the ASM state up to `target`, processing every L1 block between
+/// the last already-processed ancestor and `target`.
+///
+/// `target` is a block submitted to the worker; it may extend the current chain
+/// or, on an L1 reorg, switch to a different branch (even one whose tip is at a
+/// lower height). Runs in two phases:
+///
+/// 1. **Plan** (backward): from `target`, follow parent links via each block's `prev_blockhash`
+///    back to the base — the most recent ancestor with a stored `AsmState` — collecting the
+///    unprocessed blocks in between. This walks `target`'s own ancestry, so on an L1 reorg the base
+///    is the fork point and the abandoned branch is never visited. Only block headers are read
+///    here, so a deep reorg does not load every intervening block into memory at once. See
+///    [`plan_block_processing`].
+///
+/// 2. **Process** (forward): from the base forward (oldest first, so heights are contiguous and
+///    strictly increasing), fetch each full block, run the STF, then persist its manifest into the
+///    height-indexed MMR, its aux data, and its anchor state, advancing the in-memory anchor as it
+///    goes. Processing a height already handled on the old branch overwrites that branch's leaf in
+///    place, which is why the manifest MMR supports leaf replacement. See [`apply_block`].
+///
+/// When `target` is already processed (a resync, or a reorg back to an
+/// already-stored ancestor) the plan has no blocks to apply, so the base itself
+/// is committed as the latest anchor — moving the durable pointer so the
+/// rollback, not the abandoned higher branch, survives a restart.
+///
+/// A `target` before genesis is ignored (returns `Ok`). If the backward walk
+/// descends below genesis without finding a stored anchor state, returns
+/// `WorkerError::MissingGenesisState`. Any fetch, transition, or storage error
+/// is propagated; the caller treats it as fatal and shuts the worker down.
+fn sync_to_block<W, S>(
     state: &mut AsmWorkerServiceState<W, S>,
-    incoming_block: &L1BlockCommitment,
+    target: &L1BlockCommitment,
 ) -> crate::WorkerResult<()>
 where
     W: WorkerContext + Send + Sync + 'static,
     S: AsmSpec + Send + Sync + 'static,
     S::Params: Send + Sync + 'static,
 {
-    let ctx = &state.context;
-
-    // Handle pre-genesis: if the block is before genesis we don't care about it.
+    // Ignore blocks before genesis.
     let genesis_height = state.genesis_height();
-    let height = incoming_block.height();
+    let height = target.height();
     if height < genesis_height as u32 {
         warn!(height, "ignoring unexpected L1 block before genesis");
         return Ok(());
     }
 
-    // Traverse back the chain of l1 blocks until we find an l1 block which has AnchorState.
-    // Remember all the blocks along the way and pass it (in the reverse order) to process.
-    let pivot_span = debug_span!("asm.pivot_lookup",
+    // Phase 1: plan the work — the base state and the blocks to process onto it.
+    let plan_span = debug_span!("asm.processing_plan",
         target_height = height,
-        target_block = %incoming_block.blkid()
+        target_block = %target.blkid()
     );
-    let pivot_span_guard = pivot_span.enter();
+    let plan_span_guard = plan_span.enter();
 
-    let mut skipped_blocks = vec![];
-    let mut pivot_block = *incoming_block;
-    let mut pivot_anchor = ctx.get_anchor_state(&pivot_block);
+    let ProcessingPlan {
+        base_state,
+        base_block,
+        pending,
+    } = plan_block_processing(&state.context, target, genesis_height)?;
 
-    while pivot_anchor.is_err() && pivot_block.height() as u64 >= genesis_height {
-        let block = ctx.get_l1_block(pivot_block.blkid())?;
-        let parent_height = pivot_block.height() - 1;
-        let parent_block_id =
-            L1BlockCommitment::new(parent_height, block.header.prev_blockhash.to_l1_block_id());
+    info!(%base_block,
+        pending_blocks = pending.len(),
+        "ASM found processing base"
+    );
+    drop(plan_span_guard);
 
-        // Push the unprocessed block.
-        skipped_blocks.push((block, pivot_block));
-
-        // Update the loop state.
-        pivot_anchor = ctx.get_anchor_state(&parent_block_id);
-        pivot_block = parent_block_id;
+    // A reorg surfaces here as a base (fork point) that isn't the current
+    // in-memory tip: the backward walk followed `target`'s own ancestry, so
+    // landing on a stored anchor below our tip means the prior branch's blocks
+    // above the fork are being abandoned and their manifests/anchor state
+    // rewritten. Flag it — otherwise a reorg (including a rollback to an
+    // already-stored ancestor, where `pending` is empty) is indistinguishable
+    // from a normal forward extension in the logs.
+    if base_block != state.blkid {
+        warn!(
+            old_tip = %state.blkid,
+            fork_point = %base_block,
+            new_target = %target,
+            abandoned_blocks = state.blkid.height().saturating_sub(base_block.height()),
+            "ASM L1 reorg detected"
+        );
     }
 
-    // We reached the height before genesis (while traversing), but didn't find genesis state.
-    if (pivot_block.height() as u64) < genesis_height {
-        warn!(%incoming_block, genesis_height, "ASM hasn't found pivot anchor state at genesis");
-        return Err(crate::WorkerError::MissingGenesisState);
+    // When the target is already processed (`pending` empty — a resync, or a
+    // reorg that rolls the active tip back to an already-stored ancestor), the
+    // forward pass below applies no block, so it never moves the durable
+    // `latest` anchor pointer off the prior — possibly higher — branch. Without
+    // this, a restart would reload that stale branch from `get_latest_asm_state`
+    // instead of resuming from the rollback target. Re-commit the base as the
+    // latest anchor; the write is an idempotent overwrite (see `apply_block`).
+    if pending.is_empty() {
+        state.context.store_anchor_state(&base_block, &base_state)?;
     }
 
-    // Found pivot anchor state - our starting point.
-    info!(%pivot_block,
-        skipped_blocks = skipped_blocks.len(),
-        "ASM found pivot anchor state"
-    );
+    state.update_anchor_state(base_state, base_block);
 
-    // Drop pivot span guard before next phase
-    drop(pivot_span_guard);
-
-    state.update_anchor_state(pivot_anchor.unwrap(), pivot_block);
-
-    // Process the whole chain of unprocessed blocks, starting from older blocks till
-    // incoming_block.
-    for (block, block_id) in skipped_blocks.iter().rev() {
+    // Phase 2: process the pending blocks oldest first.
+    for block_id in pending.iter().rev() {
         let transition_span = debug_span!("asm.block_transition",
             height = block_id.height(),
             block_id = %block_id.blkid()
@@ -134,26 +171,109 @@ where
         let _transition_guard = transition_span.enter();
 
         info!(%block_id, "ASM transition attempt");
-        let (asm_stf_out, aux_data) = state.transition(block)?;
+        apply_block(state, block_id)?;
+        info!(%block_id, "ASM transition complete, manifest and state stored");
+    }
 
-        let storage_span = debug_span!("asm.manifest_storage");
-        let _storage_guard = storage_span.enter();
+    Ok(())
+}
 
-        // Persist the manifest and record its hash in the height-indexed MMR.
-        state
-            .context
-            .record_manifest(asm_stf_out.manifest.clone())?;
+/// The work needed to bring the ASM state up to a target block, produced by
+/// [`plan_block_processing`]: the base state to build on plus the blocks to
+/// process onto it.
+struct ProcessingPlan {
+    /// Stored anchor state at [`base_block`](Self::base_block) — the state
+    /// processing builds on.
+    base_state: AsmState,
+    /// The most recent ancestor of the target block with a stored anchor state
+    /// (the reorg fork point, when there is a reorg).
+    base_block: L1BlockCommitment,
+    /// Unprocessed blocks between the base and the target, newest first.
+    /// Process them in reverse to apply them oldest first.
+    pending: Vec<L1BlockCommitment>,
+}
 
-        // Store auxiliary data for prover consumption
-        state.context.store_aux_data(block_id, &aux_data)?;
+/// Walks back from `target` along parent links to build a [`ProcessingPlan`]:
+/// the base — the most recent ancestor with a stored anchor state — and the
+/// unprocessed blocks between it and `target`.
+///
+/// Reads only block headers, so a deep reorg does not load every intervening
+/// block into memory. Errors with
+/// [`MissingGenesisState`](crate::WorkerError::MissingGenesisState) if the walk
+/// reaches genesis without finding a stored anchor.
+fn plan_block_processing<W: WorkerContext>(
+    ctx: &W,
+    target: &L1BlockCommitment,
+    genesis_height: u64,
+) -> crate::WorkerResult<ProcessingPlan> {
+    let mut pending = vec![];
+    let mut cursor = *target;
 
-        let new_state = AsmState::from_output(asm_stf_out);
-        // Store and update anchor.
-        state.context.store_anchor_state(block_id, &new_state)?;
-        state.update_anchor_state(new_state, *block_id);
+    loop {
+        if let Ok(anchor) = ctx.get_anchor_state(&cursor) {
+            return Ok(ProcessingPlan {
+                base_state: anchor,
+                base_block: cursor,
+                pending,
+            });
+        }
 
-        info!(%block_id, %height, "ASM transition complete, manifest and state stored");
-    } // transition_span drops here
+        if cursor.height() as u64 <= genesis_height {
+            error!(%target, genesis_height, "ASM hasn't found base anchor state at genesis");
+            return Err(crate::WorkerError::MissingGenesisState);
+        }
+
+        // Walking back the chain only needs each block's `prev_blockhash`, so
+        // read just the header: a deep reorg can span many blocks, and holding
+        // every full block in memory until the forward pass could OOM. The full
+        // block is fetched per-height while processing.
+        let header = ctx.get_l1_block_header(cursor.blkid())?;
+        pending.push(cursor);
+
+        let parent_height = cursor.height() - 1;
+        cursor = L1BlockCommitment::new(parent_height, header.prev_blockhash.to_l1_block_id());
+    }
+}
+
+/// Runs the STF for `block_id`, then persists the results in a deliberate
+/// order — the manifest (into the height-indexed MMR) and the prover aux data
+/// first, the anchor state last — before advancing the in-memory anchor.
+///
+/// The order is the crash-safety contract. The anchor state is this block's
+/// commit point: [`plan_block_processing`] treats a block as processed only
+/// once its anchor state is stored, so it is written after everything derived
+/// from the block. If an error aborts after the manifest or aux data write but
+/// before the anchor state, the block stays uncommitted and the next sync
+/// re-runs its STF. That re-run is safe: every write on this path is an
+/// idempotent, block-keyed overwrite (the MMR leaf is replaced by height, aux
+/// data and anchor state are keyed by block id, and the STF is deterministic,
+/// so it reproduces identical values.
+fn apply_block<W, S>(
+    state: &mut AsmWorkerServiceState<W, S>,
+    block_id: &L1BlockCommitment,
+) -> crate::WorkerResult<()>
+where
+    W: WorkerContext + Send + Sync + 'static,
+    S: AsmSpec + Send + Sync + 'static,
+    S::Params: Send + Sync + 'static,
+{
+    // Fetch the full block now, one height at a time, so only a single block is
+    // resident at any point during the forward pass.
+    let block = state.context.get_l1_block(block_id.blkid())?;
+    let (asm_stf_out, aux_data) = state.transition(&block)?;
+
+    // Persist the manifest and record its hash in the height-indexed MMR.
+    state
+        .context
+        .record_manifest(asm_stf_out.manifest.clone())?;
+    // Store auxiliary data for prover consumption.
+    state.context.store_aux_data(block_id, &aux_data)?;
+
+    // Anchor state last: it is the block's commit point (see fn docs), so a
+    // crash before it leaves the block uncommitted to be safely re-run.
+    let new_state = AsmState::from_output(asm_stf_out);
+    state.context.store_anchor_state(block_id, &new_state)?;
+    state.update_anchor_state(new_state, *block_id);
 
     Ok(())
 }
@@ -175,5 +295,489 @@ impl AsmWorkerStatus {
             .as_ref()
             .map(|s| s.logs().as_slice())
             .unwrap_or(&[])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+
+    use bitcoind_async_client::traits::Reader;
+    use strata_asm_common::{AsmManifestHash, AuxRequestCollector};
+    use strata_identifiers::{Buf32, L1BlockId};
+    use strata_service::CommandCompletionSender;
+    use tokio::{sync::oneshot, task::block_in_place};
+
+    use super::*;
+    use crate::{
+        AnchorStateStore, AuxDataResolver, ManifestMmrStore, WorkerError,
+        test_utils::{
+            TestAsmWorkerContext,
+            fixtures::{self, TestAsmSpec},
+        },
+    };
+
+    /// Leaf count of the accumulator carried by the current in-memory anchor —
+    /// the snapshot size [`AsmWorkerServiceState::transition`] resolves aux data
+    /// against.
+    fn anchor_leaf_count(state: &AsmWorkerServiceState<TestAsmWorkerContext, TestAsmSpec>) -> u64 {
+        state
+            .anchor
+            .state()
+            .chain_view
+            .history_accumulator
+            .num_entries()
+    }
+
+    /// Pending block heights in the order they're processed (oldest first).
+    ///
+    /// `plan.pending` is stored newest-first; reversing here keeps the test
+    /// expectations ascending, which is easier to read.
+    fn pending_heights(plan: &ProcessingPlan) -> Vec<u32> {
+        plan.pending.iter().rev().map(|b| b.height()).collect()
+    }
+
+    /// A target extending the stored chain: the base is the genesis anchor and
+    /// every block above it is pending, applied oldest first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plan_linear_extension() {
+        let fx = fixtures::setup_state(101).await;
+        let mined = fixtures::mine(&fx.node, &fx.client, 3).await; // 102, 103, 104
+        let target = *mined.last().unwrap();
+
+        let plan = plan_block_processing(&fx.state.context, &target, fx.state.genesis_height())
+            .expect("plan should succeed");
+
+        assert_eq!(plan.base_block, fx.state.blkid);
+        assert_eq!(plan.base_state, fx.state.anchor);
+        assert_eq!(pending_heights(&plan), vec![102, 103, 104]);
+    }
+
+    /// A target that already has a stored anchor is its own base, with nothing
+    /// left to process.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plan_target_already_processed() {
+        let fx = fixtures::setup_state(101).await;
+        let mined = fixtures::mine(&fx.node, &fx.client, 2).await; // 102, 103
+        let target = mined[0]; // 102
+
+        fx.state
+            .context
+            .store_anchor_state(&target, &fx.state.anchor)
+            .unwrap();
+
+        let plan = plan_block_processing(&fx.state.context, &target, fx.state.genesis_height())
+            .expect("plan should succeed");
+
+        assert_eq!(plan.base_block, target);
+        assert!(plan.pending.is_empty());
+    }
+
+    /// On an L1 reorg, planning walks the *target's* ancestry, so the base is
+    /// the fork point — even though the abandoned branch's tip still has a
+    /// stored anchor — and the abandoned blocks are never visited.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plan_reorg_uses_fork_point() {
+        let fx = fixtures::setup_state(101).await;
+
+        // Branch A, fully "processed": 102 (the eventual fork point) and 103a.
+        let fork_point = fixtures::mine(&fx.node, &fx.client, 1).await[0]; // 102
+        let old_tip = fixtures::mine(&fx.node, &fx.client, 1).await[0]; // 103a
+        for blk in [fork_point, old_tip] {
+            fx.state
+                .context
+                .store_anchor_state(&blk, &fx.state.anchor)
+                .unwrap();
+        }
+
+        // Reorg away 103a and mine a longer branch B: 103b, 104b.
+        let branch_b = fixtures::reorg(&fx.node, &fx.client, old_tip.height() as u64, 2).await;
+        let new_tip = *branch_b.last().unwrap(); // 104b
+
+        let plan = plan_block_processing(&fx.state.context, &new_tip, fx.state.genesis_height())
+            .expect("plan should succeed");
+
+        assert_eq!(plan.base_block, fork_point);
+        assert!(!plan.pending.contains(&old_tip));
+        assert_eq!(pending_heights(&plan), vec![103, 104]);
+    }
+
+    /// When the backward walk reaches the genesis floor without finding a stored
+    /// anchor, planning fails with `MissingGenesisState`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plan_missing_genesis_state() {
+        let fx = fixtures::setup_context(104).await;
+        let tip = fx.client.get_block_hash(104).await.unwrap();
+        let target = L1BlockCommitment::new(104, tip.to_l1_block_id());
+
+        let result = plan_block_processing(&fx.context, &target, 101);
+
+        assert!(
+            matches!(result, Err(WorkerError::MissingGenesisState)),
+            "expected MissingGenesisState",
+        );
+    }
+
+    /// A target below the genesis height is ignored: no error, no state change.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_before_genesis_ignored() {
+        let mut fx = fixtures::setup_state(101).await;
+        let genesis = fx.state.blkid;
+        let leaves_before = fx.state.context.mmr_leaf_count();
+
+        let below = fx.client.get_block_hash(100).await.unwrap();
+        let target = L1BlockCommitment::new(100, below.to_l1_block_id());
+
+        sync_to_block(&mut fx.state, &target).expect("pre-genesis target is ignored, not an error");
+
+        assert_eq!(fx.state.blkid, genesis, "anchor must not move");
+        assert_eq!(
+            fx.state.context.mmr_leaf_count(),
+            leaves_before,
+            "nothing stored",
+        );
+    }
+
+    /// Syncing a chain extension processes every block above the base: the anchor
+    /// reaches the target, each height gets a stored anchor state, and one
+    /// manifest leaf lands per height.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_linear_advances_anchor() {
+        let mut fx = fixtures::setup_state(101).await;
+        let mined = fixtures::mine(&fx.node, &fx.client, 3).await; // 102, 103, 104
+        let target = *mined.last().unwrap();
+
+        sync_to_block(&mut fx.state, &target).expect("sync should succeed");
+
+        assert_eq!(fx.state.blkid, target, "anchor advanced to target");
+        for blk in &mined {
+            assert!(
+                fx.state.context.get_anchor_state(blk).is_ok(),
+                "anchor stored for {blk}",
+            );
+        }
+        // Sentinels 0..=101 (102 leaves) plus one manifest per processed height.
+        assert_eq!(fx.state.context.mmr_leaf_count(), 105);
+    }
+
+    /// Re-submitting an already-processed block repositions the in-memory anchor
+    /// to it but stores nothing new (the plan has no pending blocks).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_resync_repositions_anchor_without_reprocessing() {
+        let mut fx = fixtures::setup_state(101).await;
+        let mined = fixtures::mine(&fx.node, &fx.client, 2).await; // 102, 103
+        let earlier = mined[0];
+        let tip = mined[1];
+
+        sync_to_block(&mut fx.state, &tip).expect("initial sync");
+        let leaves_after_sync = fx.state.context.mmr_leaf_count();
+        assert_eq!(fx.state.blkid, tip);
+
+        sync_to_block(&mut fx.state, &earlier).expect("resync");
+
+        assert_eq!(
+            fx.state.blkid, earlier,
+            "anchor repositions to the resynced block",
+        );
+        assert_eq!(
+            fx.state.context.mmr_leaf_count(),
+            leaves_after_sync,
+            "no reprocessing: leaf count unchanged",
+        );
+    }
+
+    /// Rolling the tip back to an already-processed block must move the
+    /// *durable* latest pointer, not just the in-memory anchor — the plan has no
+    /// pending blocks, so nothing in the forward pass advances it. Reloading the
+    /// state over the same store confirms a restart resumes from the rollback
+    /// target rather than the stale higher branch left behind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_resync_persists_latest_across_restart() {
+        let mut fx = fixtures::setup_state(101).await;
+        let mined = fixtures::mine(&fx.node, &fx.client, 2).await; // 102, 103
+        let earlier = mined[0];
+        let tip = mined[1];
+
+        sync_to_block(&mut fx.state, &tip).expect("initial sync");
+        assert_eq!(
+            fx.state
+                .context
+                .get_latest_asm_state()
+                .unwrap()
+                .map(|(b, _)| b),
+            Some(tip),
+            "latest tracks the higher branch after the initial sync",
+        );
+
+        sync_to_block(&mut fx.state, &earlier).expect("resync to the earlier block");
+
+        // The durable pointer follows the rollback...
+        assert_eq!(
+            fx.state
+                .context
+                .get_latest_asm_state()
+                .unwrap()
+                .map(|(b, _)| b),
+            Some(earlier),
+            "latest moved to the rollback target",
+        );
+
+        // ...so a restart over the same store resumes there, not at the stale tip.
+        let context = fx.state.context.clone();
+        let params = fixtures::genesis_params(&fx.client, 101).await;
+        let reloaded = AsmWorkerServiceState::new(context, TestAsmSpec, params).unwrap();
+        assert_eq!(
+            reloaded.blkid, earlier,
+            "restart resumes from the rollback target",
+        );
+    }
+
+    /// On a reorg, the heights shared with the old branch have their manifest
+    /// leaves overwritten in place (not appended), while the common fork point
+    /// below the divergence is left untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_reorg_overwrites_leaves() {
+        let mut fx = fixtures::setup_state(101).await;
+
+        // Branch A: process 102, 103, 104.
+        let branch_a = fixtures::mine(&fx.node, &fx.client, 3).await;
+        sync_to_block(&mut fx.state, branch_a.last().unwrap()).expect("sync branch A");
+        let leaves_a = fx.state.context.mmr_leaves();
+
+        // Reorg below 103 and process a longer branch B: 103b, 104b, 105b.
+        let branch_b = fixtures::reorg(&fx.node, &fx.client, 103, 3).await;
+        let new_tip = *branch_b.last().unwrap();
+        sync_to_block(&mut fx.state, &new_tip).expect("sync branch B");
+        let leaves_b = fx.state.context.mmr_leaves();
+
+        assert_eq!(fx.state.blkid, new_tip, "anchor on the new branch");
+        // Heights 103, 104 overwritten in place; 105 appended — not 108 leaves.
+        assert_eq!(leaves_b.len(), 106, "overwrite, not append");
+        assert_ne!(
+            leaves_b[103], leaves_a[103],
+            "leaf 103 now reflects branch B"
+        );
+        assert_eq!(leaves_b[102], leaves_a[102], "the fork point is untouched");
+    }
+
+    /// End-to-end at the resolver boundary: drive the real STF over a chain,
+    /// then reorg to a shorter branch and probe what the post-reorg context can
+    /// serve to a prover.
+    ///
+    /// Genesis at height 5. Chain A (6,7,8,9) is fully processed, so every
+    /// height 6..=9 resolves against the anchor-9 accumulator. Reorging to the
+    /// shorter branch B (6',7') overwrites heights 6,7 in place but leaves the
+    /// now-orphaned 8,9 sitting in storage. The point: those orphans are still
+    /// *present* (their hashes are fetchable) yet no longer *provable* — an
+    /// inclusion proof can't be built against the shorter post-reorg accumulator,
+    /// so the resolver refuses them. They stay until 8',9' overwrite them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reorg_orphans_leaves_present_but_unprovable() {
+        let mut fx = fixtures::setup_state(5).await;
+
+        // Chain A: process 6, 7, 8, 9 through the full STF.
+        let branch_a = fixtures::mine(&fx.node, &fx.client, 4).await; // 6,7,8,9
+        let tip_a = *branch_a.last().unwrap(); // 9
+        sync_to_block(&mut fx.state, &tip_a).expect("sync branch A");
+        assert_eq!(fx.state.blkid, tip_a, "anchor at chain A tip");
+
+        // The resolver runs against the current anchor's accumulator: sentinels
+        // 0..=5 plus one manifest per processed height 6..=9.
+        let leaf_count_a = anchor_leaf_count(&fx.state);
+        assert_eq!(leaf_count_a, 10);
+
+        // Everything up to height 9 resolves against chain A.
+        let resolver_a = AuxDataResolver::new(&fx.state.context, leaf_count_a);
+        let mut req_a = AuxRequestCollector::new(0, leaf_count_a);
+        req_a.request_manifest_hashes(6, 9);
+        let data = resolver_a
+            .resolve(&req_a.into_requests())
+            .expect("resolve 6..=9 on chain A");
+        assert_eq!(
+            data.manifest_hashes().len(),
+            4,
+            "one entry per height 6..=9"
+        );
+
+        // Snapshot chain A's stored leaves to compare after the reorg.
+        let leaves_a = fx.state.context.mmr_leaves();
+
+        // Reorg: invalidate 6 (drops 6..=9), mine a *shorter* branch B: 6', 7'.
+        let branch_b = fixtures::reorg(&fx.node, &fx.client, 6, 2).await; // 6',7'
+        let tip_b = *branch_b.last().unwrap(); // 7'
+        sync_to_block(&mut fx.state, &tip_b).expect("sync branch B");
+        assert_eq!(fx.state.blkid, tip_b, "anchor on branch B");
+
+        // (1) The orphaned leaves 8,9 are still in storage — branch B only
+        // reached height 7, so it never touched them. The leaf count is
+        // unchanged and the hashes still hold chain A's values.
+        assert_eq!(
+            fx.state.context.mmr_leaf_count(),
+            10,
+            "8,9 still occupy the MMR",
+        );
+        for height in [8u64, 9] {
+            let hash = fx
+                .state
+                .context
+                .get_manifest_hash(height)
+                .expect("orphaned hash still fetchable");
+            assert_eq!(
+                hash,
+                AsmManifestHash::from(leaves_a[height as usize]),
+                "leaf {height} still holds chain A's hash",
+            );
+        }
+        // Heights 6,7 were overwritten in place by branch B.
+        let leaves_b = fx.state.context.mmr_leaves();
+        assert_ne!(leaves_b[6], leaves_a[6], "leaf 6 now reflects branch B");
+
+        // The post-reorg accumulator is shorter: sentinels 0..=5 plus 6',7'.
+        let leaf_count_b = anchor_leaf_count(&fx.state);
+        assert_eq!(leaf_count_b, 8, "snapshot shrank to branch B's length");
+        let resolver_b = AuxDataResolver::new(&fx.state.context, leaf_count_b);
+
+        // Branch B's own heights still resolve.
+        let mut req_b = AuxRequestCollector::new(0, leaf_count_b);
+        req_b.request_manifest_hashes(6, 7);
+        resolver_b
+            .resolve(&req_b.into_requests())
+            .expect("6'..=7' resolve on branch B");
+
+        // (2) But the orphaned 8,9 can't be proven against the shorter snapshot:
+        // their index sits at/over the snapshot leaf count, so proof generation
+        // fails at the first such index (8). The collector would normally drop
+        // such a request as out-of-bounds, so bypass that clamp to exercise the
+        // resolver-level guarantee directly.
+        let mut req_orphans = AuxRequestCollector::new(0, u64::MAX);
+        req_orphans.request_manifest_hashes(8, 9);
+        let result = resolver_b.resolve(&req_orphans.into_requests());
+        assert!(
+            matches!(result, Err(WorkerError::MmrProofFailed { index: 8 })),
+            "orphaned leaves are present but unprovable at the post-reorg snapshot",
+        );
+    }
+
+    /// A fetch failure during the backward walk (block the node cannot serve)
+    /// propagates out of `sync_to_block` rather than being swallowed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_propagates_fetch_error() {
+        let mut fx = fixtures::setup_state(101).await;
+        // Above genesis, so the walk tries to fetch — but the id is not a real block.
+        let bogus = L1BlockId::from(Buf32::from([0xab; 32]));
+        let target = L1BlockCommitment::new(102, bogus);
+
+        let result = sync_to_block(&mut fx.state, &target);
+
+        assert!(matches!(result, Err(WorkerError::MissingL1Block(_))));
+    }
+
+    /// `apply_block` runs the STF for a single block, records its manifest, and
+    /// advances the in-memory anchor.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_block_stores_manifest_and_advances() {
+        let mut fx = fixtures::setup_state(101).await;
+        let block = fixtures::mine(&fx.node, &fx.client, 1).await[0]; // 102, child of genesis
+
+        apply_block(&mut fx.state, &block).expect("apply_block should succeed");
+
+        assert_eq!(fx.state.blkid, block, "in-memory anchor advanced");
+        assert!(
+            fx.state.context.get_anchor_state(&block).is_ok(),
+            "anchor persisted",
+        );
+        // Sentinels 0..=101 (102 leaves) plus the one manifest just recorded.
+        assert_eq!(fx.state.context.mmr_leaf_count(), 103);
+    }
+
+    /// Re-running `apply_block` for the same block reproduces identical results
+    /// and overwrites in place — the idempotency the crash-safety contract leans
+    /// on when a sync re-runs an uncommitted block.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_block_rerun_is_idempotent() {
+        let mut fx = fixtures::setup_state(101).await;
+        let genesis_state = fx.state.anchor.clone();
+        let genesis_blk = fx.state.blkid;
+        let block = fixtures::mine(&fx.node, &fx.client, 1).await[0]; // 102
+
+        apply_block(&mut fx.state, &block).expect("first apply");
+        let first_leaf = fx.state.context.mmr_leaves()[102];
+        let first_state = fx.state.context.get_anchor_state(&block).unwrap();
+        let first_count = fx.state.context.mmr_leaf_count();
+
+        // Rewind the in-memory anchor to the parent (as a crash before the
+        // anchor-state commit would leave it) and re-run the block.
+        fx.state.update_anchor_state(genesis_state, genesis_blk);
+        apply_block(&mut fx.state, &block).expect("re-apply");
+
+        assert_eq!(
+            fx.state.context.mmr_leaves()[102],
+            first_leaf,
+            "manifest reproduced",
+        );
+        assert_eq!(
+            fx.state.context.get_anchor_state(&block).unwrap(),
+            first_state,
+            "anchor reproduced",
+        );
+        assert_eq!(
+            fx.state.context.mmr_leaf_count(),
+            first_count,
+            "overwrite, no extra append",
+        );
+    }
+
+    /// Runs `process_input` the way the service framework does — on a plain OS
+    /// thread off the async runtime. `send_blocking` (and any block fetch the
+    /// context drives via its captured handle) panic in an async context, so the
+    /// dedicated thread is load-bearing, not incidental. `block_in_place` keeps
+    /// the runtime free to serve that fetch while this thread blocks on it.
+    fn process_input_off_runtime(
+        mut state: AsmWorkerServiceState<TestAsmWorkerContext, TestAsmSpec>,
+        msg: AsmWorkerMessage,
+    ) -> (
+        anyhow::Result<Response>,
+        AsmWorkerServiceState<TestAsmWorkerContext, TestAsmSpec>,
+    ) {
+        block_in_place(|| {
+            thread::spawn(move || {
+                let response = AsmWorkerService::process_input(&mut state, msg);
+                (response, state)
+            })
+            .join()
+            .unwrap()
+        })
+    }
+
+    /// A block that syncs cleanly: `process_input` returns `Continue`, hands the
+    /// caller `Ok`, and the anchor advances.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn process_input_success_continues() {
+        let fx = fixtures::setup_state(101).await;
+        let target = fixtures::mine(&fx.node, &fx.client, 1).await[0]; // 102
+        let (tx, rx) = oneshot::channel();
+        let msg = AsmWorkerMessage::SubmitBlock(target, CommandCompletionSender::new(tx));
+
+        let (response, state) = process_input_off_runtime(fx.state, msg);
+
+        assert!(matches!(response.unwrap(), Response::Continue));
+        assert!(rx.await.unwrap().is_ok(), "caller received Ok");
+        assert_eq!(state.blkid, target, "anchor advanced");
+    }
+
+    /// A failing sync shuts the worker down: `process_input` returns `ShouldExit`
+    /// and the error reaches the caller. The genesis-height bogus id errors in the
+    /// plan's genesis check, before any fetch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn process_input_failure_exits() {
+        let fx = fixtures::setup_state(101).await;
+        let bogus = L1BlockCommitment::new(101, L1BlockId::from(Buf32::from([0xcd; 32])));
+        let (tx, rx) = oneshot::channel();
+        let msg = AsmWorkerMessage::SubmitBlock(bogus, CommandCompletionSender::new(tx));
+
+        let (response, _state) = process_input_off_runtime(fx.state, msg);
+
+        assert!(matches!(response.unwrap(), Response::ShouldExit));
+        assert!(rx.await.unwrap().is_err(), "caller received the error");
     }
 }
