@@ -771,7 +771,6 @@ dependencies = [
  "sled",
  "ssz",
  "strata-asm-common",
- "strata-asm-worker",
  "strata-identifiers",
  "strata-merkle",
  "strata-merkle-node-store",
@@ -8030,6 +8029,7 @@ version = "0.1.0"
 dependencies = [
  "bitcoin",
  "jsonrpsee",
+ "strata-asm-common",
  "strata-asm-proof-types",
  "strata-asm-proto-bridge-v1",
  "strata-asm-proto-bridge-v1-types",

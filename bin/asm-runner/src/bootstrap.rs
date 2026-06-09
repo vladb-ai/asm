@@ -18,7 +18,7 @@ use crate::{
     config::{AsmRpcConfig, BitcoinConfig},
     prover::{InputBuilder, ProofBackend, ProofOrchestrator},
     rpc_server::{AsmProofRpcDeps, run_rpc_server},
-    storage::create_storage,
+    storage::{Storage, create_storage},
     worker_context::{AsmWorkerContext, MohoStorage},
 };
 pub(crate) async fn bootstrap(
@@ -27,7 +27,13 @@ pub(crate) async fn bootstrap(
     executor: TaskExecutor,
 ) -> Result<()> {
     // 1. Create storage
-    let (state_db, mmr_db, export_entries_db) = create_storage(&config.database)?;
+    let Storage {
+        state_db,
+        aux_db,
+        manifest_db,
+        mmr_db,
+        export_entries_db,
+    } = create_storage(&config.database)?;
 
     // 2. Connect to Bitcoin node
     let bitcoin_client = Arc::new(connect_bitcoin(&config.bitcoin).await?);
@@ -62,6 +68,8 @@ pub(crate) async fn bootstrap(
         bitcoin_client.clone(),
         &config.bitcoin.retry_config,
         state_db.clone(),
+        aux_db.clone(),
+        manifest_db.clone(),
         mmr_db.clone(),
         export_entries_for_worker,
         moho_storage,
@@ -102,6 +110,7 @@ pub(crate) async fn bootstrap(
 
         let input_builder = InputBuilder::new(
             state_db.clone(),
+            aux_db.clone(),
             bitcoin_client.clone(),
             proof_db.clone(),
             moho_state_db,
@@ -159,6 +168,7 @@ pub(crate) async fn bootstrap(
     executor.spawn_critical_async_with_shutdown("rpc_server", move |shutdown| {
         run_rpc_server(
             state_db,
+            manifest_db,
             asm_worker,
             bitcoin_client,
             proof_rpc_deps,

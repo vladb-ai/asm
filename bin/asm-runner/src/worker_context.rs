@@ -17,7 +17,9 @@
 
 use std::sync::Arc;
 
-use asm_storage::{AsmManifestMmrDb, AsmStateDb, ExportEntriesDb};
+use asm_storage::{
+    ExportEntriesDb, SledAsmAuxDataDb, SledAsmManifestDb, SledAsmManifestMmrDb, SledAsmStateDb,
+};
 use bitcoin::{Block, BlockHash, Network, block::Header};
 use bitcoind_async_client::{Client, error::ClientError, traits::Reader};
 use moho_runtime_interface::MohoProgram;
@@ -60,8 +62,10 @@ pub(crate) struct AsmWorkerContext {
     rpc_backoff: ExponentialBackoff,
     /// Maximum retry attempts per Bitcoin RPC call.
     rpc_max_retries: u16,
-    state_db: Arc<AsmStateDb>,
-    mmr_db: Arc<AsmManifestMmrDb>,
+    state_db: Arc<SledAsmStateDb>,
+    aux_db: Arc<SledAsmAuxDataDb>,
+    manifest_db: Arc<SledAsmManifestDb>,
+    mmr_db: Arc<SledAsmManifestMmrDb>,
     export_entries_db: Option<ExportEntriesDb>,
     moho_storage: Option<MohoStorage>,
     /// L1 height of the chain genesis (anchor) block.
@@ -77,8 +81,10 @@ impl AsmWorkerContext {
         runtime_handle: Handle,
         bitcoin_client: Arc<Client>,
         retry: &RetryConfig,
-        state_db: Arc<AsmStateDb>,
-        mmr_db: Arc<AsmManifestMmrDb>,
+        state_db: Arc<SledAsmStateDb>,
+        aux_db: Arc<SledAsmAuxDataDb>,
+        manifest_db: Arc<SledAsmManifestDb>,
+        mmr_db: Arc<SledAsmManifestMmrDb>,
         export_entries_db: Option<ExportEntriesDb>,
         moho_storage: Option<MohoStorage>,
         genesis_height: u64,
@@ -89,6 +95,8 @@ impl AsmWorkerContext {
             rpc_backoff: retry.backoff(),
             rpc_max_retries: retry.max_retries,
             state_db,
+            aux_db,
+            manifest_db,
             mmr_db,
             export_entries_db,
             moho_storage,
@@ -201,15 +209,29 @@ impl L1DataProvider for AsmWorkerContext {
 }
 
 impl AnchorStateStore for AsmWorkerContext {
+    // The state store persists only the `AnchorState`; the worker's `AsmState`
+    // umbrella also carries logs, which live in the manifest store. The logs are
+    // not needed to drive transitions (the worker reads only `AsmState::state()`),
+    // so reads reconstruct an `AsmState` with empty logs — matching how genesis
+    // is seeded.
     fn get_latest_asm_state(&self) -> WorkerResult<Option<(L1BlockCommitment, AsmState)>> {
-        self.state_db.get_latest().map_err(|_| WorkerError::DbError)
+        Ok(self
+            .state_db
+            .get_latest()
+            .map_err(|_| WorkerError::DbError)?
+            .map(|anchor| {
+                let blockid = anchor.chain_view.pow_state.last_verified_block;
+                (blockid, AsmState::new(anchor, vec![]))
+            }))
     }
 
     fn get_anchor_state(&self, blockid: &L1BlockCommitment) -> WorkerResult<AsmState> {
-        self.state_db
+        let anchor = self
+            .state_db
             .get(blockid)
             .map_err(|_| WorkerError::DbError)?
-            .ok_or(WorkerError::MissingAsmState(*blockid.blkid()))
+            .ok_or(WorkerError::MissingAsmState(*blockid.blkid()))?;
+        Ok(AsmState::new(anchor, vec![]))
     }
 
     fn store_anchor_state(
@@ -242,7 +264,7 @@ impl AnchorStateStore for AsmWorkerContext {
         }
 
         self.state_db
-            .put(blockid, state)
+            .put(state.state())
             .map_err(|_| WorkerError::DbError)?;
 
         Ok(())
@@ -250,10 +272,10 @@ impl AnchorStateStore for AsmWorkerContext {
 }
 
 impl ManifestMmrStore for AsmWorkerContext {
-    fn put_manifest(&self, _manifest: AsmManifest) -> WorkerResult<()> {
-        // Full-manifest persistence (for chaintsn and other consumers) is not
-        // wired up yet; only the hash enters the MMR (via `put_manifest_hash`).
-        Ok(())
+    fn put_manifest(&self, manifest: AsmManifest) -> WorkerResult<()> {
+        self.manifest_db
+            .put(&manifest)
+            .map_err(|_| WorkerError::DbError)
     }
 
     fn put_manifest_hash(&self, height: u64, hash: AsmManifestHash) -> WorkerResult<()> {
@@ -286,14 +308,14 @@ impl ManifestMmrStore for AsmWorkerContext {
 
 impl AuxDataStore for AsmWorkerContext {
     fn store_aux_data(&self, blockid: &L1BlockCommitment, data: &AuxData) -> WorkerResult<()> {
-        self.state_db
-            .put_aux_data(blockid, data)
+        self.aux_db
+            .put(blockid, data)
             .map_err(|_| WorkerError::DbError)
     }
 
     fn get_aux_data(&self, blockid: &L1BlockCommitment) -> WorkerResult<AuxData> {
-        self.state_db
-            .get_aux_data(blockid)
+        self.aux_db
+            .get(blockid)
             .map_err(|_| WorkerError::DbError)?
             .ok_or(WorkerError::MissingAuxData(*blockid))
     }
