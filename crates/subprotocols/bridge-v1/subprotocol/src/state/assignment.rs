@@ -16,30 +16,31 @@ use ssz::{Decode as SszDecode, DecodeError, Encode as SszEncode};
 use ssz_derive::{Decode, Encode};
 use strata_asm_common::sorted_vec::SortedVec;
 use strata_asm_proto_bridge_v1_types::{
-    OperatorBitmap, OperatorIdx, OperatorSelection, WithdrawalCommand, filter_eligible_operators,
+    OperatorBitmap, OperatorIdx, WithdrawalIntent, WithdrawalOutput, filter_eligible_operators,
 };
+use strata_btc_types::BitcoinAmount;
 use strata_identifiers::{Buf32, L1BlockCommitment, L1BlockId, L1Height};
 
-use crate::{
-    errors::{WithdrawalAssignmentError, WithdrawalCommandError},
-    state::deposit::DepositEntry,
-};
+use crate::{errors::WithdrawalAssignmentError, state::deposit::DepositEntry};
 
-/// Assignment entry linking a deposit UTXO to an operator for withdrawal processing.
-///
-/// Each assignment represents a task, assigned to a specific operator to process
-/// a withdrawal of from a particular deposit UTXO.
+/// Links a deposit UTXO to the operator responsible for fulfilling its withdrawal.
 #[derive(Clone, Debug, Eq, PartialEq, Arbitrary, Serialize, Deserialize, Encode, Decode)]
 pub struct AssignmentEntry {
     /// Deposit entry that has been assigned
     deposit_entry: DepositEntry,
 
-    /// Withdrawal command specifying outputs and amounts.
-    withdrawal_cmd: WithdrawalCommand,
+    /// The Bitcoin output this assignment must pay out: destination and amount.
+    withdrawal_output: WithdrawalOutput,
+
+    /// Amount the operator can take as fees for processing the withdrawal.
+    ///
+    /// Deducted from the withdrawal amount: the user receives the net amount
+    /// (see [`net_amount`](Self::net_amount)) and the operator keeps this fee.
+    operator_fee: BitcoinAmount,
 
     /// Index of the operator currently assigned to execute this withdrawal.
     ///
-    /// If they successfully front the withdrawal based on `withdrawal_cmd`
+    /// If they successfully front the withdrawal based on `withdrawal_output`
     /// within the `fulfillment_deadline`, they are able to unlock their claim.
     current_assignee: OperatorIdx,
 
@@ -70,76 +71,45 @@ impl Ord for AssignmentEntry {
 }
 
 impl AssignmentEntry {
-    // TODO(STR-2356): rename this function — it's no longer purely random, it honors user-selected
-    // operators when eligible and falls back to random.
-    /// Creates a new assignment entry by randomly selecting an eligible operator.
+    /// Creates a new assignment, selecting the assignee from the deposit's eligible operators.
     ///
-    /// Performs deterministic random selection of an operator from the deposit's notary set,
-    /// filtering by currently active operators. The RNG is keyed by `(L1BlockId, deposit_idx)`
-    /// — the L1 block id seeds `ChaChaRng` and the deposit index sets the ChaCha20 stream id —
-    /// so multiple assignments created in the same block draw from independent streams
-    /// instead of collapsing onto a single operator.
+    /// Honors the withdrawal intent's preferred operator when it is still eligible; otherwise
+    /// picks one deterministically at random.
     ///
-    /// # Parameters
-    ///
-    /// - `deposit_entry` - The deposit entry to be processed
-    /// - `withdrawal_cmd` - Withdrawal command with output specifications
-    /// - `fulfillment_deadline` - Bitcoin block height deadline for assignment fulfillment
-    /// - `current_active_operators` - Bitmap of currently active operator indices
-    /// - `seed` - L1 block ID used as seed for deterministic random selection
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(AssignmentEntry)` - A new assignment entry with randomly selected operator
-    /// - `Err(WithdrawalAssignmentError)` - If no eligible operators are available or bitmap
-    ///   operation fails
-    pub fn create_with_random_assignment(
+    /// Returns [`WithdrawalAssignmentError::NoEligibleOperators`] if no operator from the
+    /// deposit's notary set is currently active.
+    pub fn create(
         deposit_entry: DepositEntry,
-        withdrawal_cmd: WithdrawalCommand,
+        withdrawal_intent: WithdrawalIntent,
+        operator_fee: BitcoinAmount,
         fulfillment_deadline: L1Height,
         current_active_operators: &OperatorBitmap,
         seed: L1BlockId,
-        selected_operator: OperatorSelection,
     ) -> Result<Self, WithdrawalAssignmentError> {
-        // No previous assignees at creation
+        // No operators have been tried yet.
         let previous_assignees =
             OperatorBitmap::new_with_size(deposit_entry.notary_operators().len(), false);
 
-        let eligible_operators = filter_eligible_operators(
+        let eligible = filter_eligible_operators(
             deposit_entry.notary_operators(),
             &previous_assignees,
             current_active_operators,
         )?;
 
-        let active_count = eligible_operators.active_count();
-        if active_count == 0 {
-            return Err(WithdrawalAssignmentError::NoEligibleOperators {
-                deposit_idx: deposit_entry.idx(),
-            });
-        }
-
-        // Honor selected operator if eligible, otherwise fall back to random selection
-        let current_assignee = if let Some(idx) = selected_operator
+        // Honor the user's preferred operator when eligible; otherwise pick one at random.
+        let current_assignee = match withdrawal_intent
+            .selected_operator()
             .as_specific()
-            .filter(|&idx| eligible_operators.is_active(idx))
+            .filter(|&idx| eligible.is_active(idx))
         {
-            idx
-        } else {
-            // Seed with the L1 block id and stream-separate by deposit index so concurrent
-            // assignments in the same block draw from independent ChaCha20 streams.
-            let seed_bytes: [u8; 32] = Buf32::from(seed).into();
-            let mut rng = ChaChaRng::from_seed(seed_bytes);
-            rng.set_stream(deposit_entry.idx() as u64);
-            let random_index = (rng.next_u32() as usize) % active_count;
-            eligible_operators
-                .active_indices()
-                .nth(random_index)
-                .expect("random_index is within bounds of active_count")
+            Some(idx) => idx,
+            None => select_random_operator(&eligible, seed, deposit_entry.idx())?,
         };
 
         Ok(Self {
-            deposit_entry: deposit_entry.clone(),
-            withdrawal_cmd,
+            deposit_entry,
+            withdrawal_output: withdrawal_intent.to_output(),
+            operator_fee,
             current_assignee,
             previous_assignees,
             fulfillment_deadline,
@@ -151,9 +121,21 @@ impl AssignmentEntry {
         self.deposit_entry.idx()
     }
 
-    /// Returns a reference to the withdrawal command.
-    pub fn withdrawal_command(&self) -> &WithdrawalCommand {
-        &self.withdrawal_cmd
+    /// Returns a reference to the withdrawal output.
+    pub fn withdrawal_output(&self) -> &WithdrawalOutput {
+        &self.withdrawal_output
+    }
+
+    /// Returns the operator fee deducted from this withdrawal.
+    pub fn operator_fee(&self) -> BitcoinAmount {
+        self.operator_fee
+    }
+
+    /// Returns the amount the user receives: the withdrawal amount minus the operator fee.
+    pub fn net_amount(&self) -> BitcoinAmount {
+        self.withdrawal_output
+            .amt()
+            .saturating_sub(self.operator_fee)
     }
 
     /// Returns the index of the currently assigned operator.
@@ -166,72 +148,47 @@ impl AssignmentEntry {
         self.fulfillment_deadline
     }
 
-    /// Reassigns the withdrawal to a new randomly selected operator.
+    /// Reassigns the withdrawal to a different operator and updates the fulfillment deadline.
     ///
-    /// Moves the current assignee to the previous assignees list and randomly selects
-    /// a new operator from eligible candidates. If no eligible operators remain (all
-    /// have been tried), clears the previous assignees list and selects from all
-    /// active notary operators.
-    ///
-    /// # Parameters
-    ///
-    /// - `new_deadline` - The new absolute Bitcoin block height deadline for fulfillment
-    /// - `seed` - L1 block ID used as seed for deterministic random selection
-    /// - `current_active_operators` - Bitmap of currently active operator indices
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(())` - If the reassignment succeeded
-    /// - `Err(WithdrawalAssignmentError)` - If the bitmap operation fails or no eligible operators
-    ///   are available
+    /// Marks the current assignee as tried and selects a new operator from those not yet tried.
+    /// Once every operator has been tried, the history is cleared and selection draws from the
+    /// full active set again.
     pub fn reassign(
         &mut self,
         new_deadline: L1Height,
         seed: L1BlockId,
         current_active_operators: &OperatorBitmap,
     ) -> Result<(), WithdrawalAssignmentError> {
+        // Mark the current assignee as tried so we don't immediately reselect it.
         self.previous_assignees
             .try_set(self.current_assignee, true)
             .map_err(WithdrawalAssignmentError::BitmapError)?;
 
-        // Seed with the L1 block id and stream-separate by deposit index so concurrent
-        // reassignments in the same block draw from independent ChaCha20 streams.
-        let seed_bytes: [u8; 32] = Buf32::from(seed).into();
-        let mut rng = ChaChaRng::from_seed(seed_bytes);
-        rng.set_stream(self.deposit_entry.idx() as u64);
+        let deposit_idx = self.deposit_entry.idx();
 
-        // Use the already cached bitmap from DepositEntry instead of converting from Vec
-        let mut eligible_operators = filter_eligible_operators(
+        // Prefer an operator that hasn't been tried yet; once every operator has been tried,
+        // reset the history and reselect from the full active set.
+        let eligible = filter_eligible_operators(
             self.deposit_entry.notary_operators(),
             &self.previous_assignees,
             current_active_operators,
         )?;
-
-        if eligible_operators.active_count() == 0 {
-            // If no eligible operators left, clear previous assignees
-            self.previous_assignees =
-                OperatorBitmap::new_with_size(self.deposit_entry.notary_operators().len(), false);
-            eligible_operators = filter_eligible_operators(
-                self.deposit_entry.notary_operators(),
-                &self.previous_assignees,
-                current_active_operators,
-            )?;
-        }
-
-        // If still no eligible operators, return error
-        let active_count = eligible_operators.active_count();
-        if active_count == 0 {
-            return Err(WithdrawalAssignmentError::NoEligibleOperators {
-                deposit_idx: self.deposit_entry.idx(),
-            });
-        }
-
-        // Select a random operator from eligible ones
-        let random_index = (rng.next_u32() as usize) % active_count;
-        let new_assignee = eligible_operators
-            .active_indices()
-            .nth(random_index)
-            .expect("random_index is within bounds of active_count");
+        let new_assignee = match select_random_operator(&eligible, seed, deposit_idx) {
+            Ok(operator) => operator,
+            Err(WithdrawalAssignmentError::NoEligibleOperators { .. }) => {
+                self.previous_assignees = OperatorBitmap::new_with_size(
+                    self.deposit_entry.notary_operators().len(),
+                    false,
+                );
+                let eligible = filter_eligible_operators(
+                    self.deposit_entry.notary_operators(),
+                    &self.previous_assignees,
+                    current_active_operators,
+                )?;
+                select_random_operator(&eligible, seed, deposit_idx)?
+            }
+            Err(err) => return Err(err),
+        };
 
         self.current_assignee = new_assignee;
         self.fulfillment_deadline = new_deadline;
@@ -239,29 +196,39 @@ impl AssignmentEntry {
     }
 }
 
-/// Table for managing operator assignments with efficient lookup operations.
+/// Deterministically selects one operator from `eligible`, keyed by `(seed, deposit_idx)`.
 ///
-/// This table maintains all assignments linking deposits to operators, providing
-/// efficient insertion, lookup, and filtering operations. The table maintains
-/// sorted order for binary search efficiency.
+/// The L1 block id seeds `ChaChaRng` and the deposit index selects the ChaCha20 stream, so
+/// selections anchored to the same block draw from independent streams rather than collapsing
+/// onto a single operator.
+///
+/// Returns [`WithdrawalAssignmentError::NoEligibleOperators`] when `eligible` is empty:
+/// `checked_rem` yields `None` for a zero-length set, and `nth` otherwise always succeeds since
+/// the index is `< active_count`.
+fn select_random_operator(
+    eligible: &OperatorBitmap,
+    seed: L1BlockId,
+    deposit_idx: u32,
+) -> Result<OperatorIdx, WithdrawalAssignmentError> {
+    let seed_bytes: [u8; 32] = Buf32::from(seed).into();
+    let mut rng = ChaChaRng::from_seed(seed_bytes);
+    rng.set_stream(deposit_idx as u64);
+
+    (rng.next_u32() as usize)
+        .checked_rem(eligible.active_count())
+        .and_then(|index| eligible.active_indices().nth(index))
+        .ok_or(WithdrawalAssignmentError::NoEligibleOperators { deposit_idx })
+}
+
+/// A table of operator assignments, kept sorted by deposit index.
 ///
 /// # Ordering Invariant
 ///
-/// The assignments vector **MUST** remain sorted by deposit index at all times.
-/// This invariant enables O(log n) lookup operations via binary search.
-///
-/// # Assignment Management
-///
-/// The table supports various operations including:
-/// - Creating new assignments with optimized insertion
-/// - Looking up assignments by deposit index
-/// - Filtering assignments by operator or expiration status
-/// - Removing completed assignments
+/// The entries **MUST** stay sorted by deposit index; this is what makes
+/// [`get_assignment`](Self::get_assignment) an O(log n) binary search.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssignmentTable {
-    /// Vector of assignment entries, sorted by deposit index.
-    ///
-    /// **Invariant**: MUST be sorted by `AssignmentEntry::deposit_idx` field.
+    /// Assignment entries, sorted by deposit index.
     assignments: SortedVec<AssignmentEntry>,
 
     /// The duration (in blocks) for which the operator is assigned to fulfill the withdrawal.
@@ -317,12 +284,18 @@ impl SszDecode for AssignmentTable {
 }
 
 impl AssignmentTable {
-    /// Creates a new empty assignment table with no assignments
+    /// Creates an empty assignment table.
     pub fn new(assignment_duration: u16) -> Self {
         Self {
             assignments: SortedVec::new_empty(),
             assignment_duration,
         }
+    }
+
+    /// Calculates the fulfillment deadline for an assignment anchored at `current_height`,
+    /// `assignment_duration` blocks later.
+    fn calculate_deadline(&self, current_height: L1Height) -> L1Height {
+        current_height + self.assignment_duration as u32
     }
 
     /// Returns the number of assignments in the table.
@@ -340,48 +313,33 @@ impl AssignmentTable {
         self.assignments.as_slice()
     }
 
-    /// Retrieves an assignment entry by its deposit index.
-    /// # Returns
-    ///
-    /// - `Some(&AssignmentEntry)` if the assignment exists
-    /// - `None` if no assignment for the given deposit index is found
+    /// Returns the assignment for `deposit_idx`, or `None` if there is none.
     pub fn get_assignment(&self, deposit_idx: u32) -> Option<&AssignmentEntry> {
-        self.assignments
-            .as_slice()
+        let assignments = self.assignments.as_slice();
+        let idx = assignments
             .binary_search_by_key(&deposit_idx, |entry| entry.deposit_idx())
-            .ok()
-            .map(|i| &self.assignments.as_slice()[i])
+            .ok()?;
+        Some(&assignments[idx])
     }
 
-    /// Creates a new assignment entry with optimized insertion.
+    /// Inserts an assignment, preserving the sort order.
     ///
     /// # Panics
     ///
-    /// Panics if an assignment with the given deposit index already exists.
+    /// Panics if an assignment with the same deposit index already exists.
     pub fn insert(&mut self, entry: AssignmentEntry) {
-        // Check if entry already exists
         if self.get_assignment(entry.deposit_idx()).is_some() {
             panic!(
                 "Assignment with deposit index {} already exists",
                 entry.deposit_idx()
             );
         }
-
-        // SortedVec handles the insertion and maintains order
         self.assignments.insert(entry);
     }
 
-    /// Removes an assignment by its deposit index.
-    ///
-    /// # Returns
-    ///
-    /// - `Some(AssignmentEntry)` if the assignment was found and removed
-    /// - `None` if no assignment with the given deposit index exists
+    /// Removes and returns the assignment for `deposit_idx`, or `None` if there is none.
     pub fn remove_assignment(&mut self, deposit_idx: u32) -> Option<AssignmentEntry> {
-        // Find the assignment first
         let assignment = self.get_assignment(deposit_idx)?.clone();
-
-        // Remove it using SortedVec's remove method
         if self.assignments.remove(&assignment) {
             Some(assignment)
         } else {
@@ -389,38 +347,20 @@ impl AssignmentTable {
         }
     }
 
-    /// Reassigns all expired assignments to new randomly selected operators.
+    /// Reassigns every assignment whose deadline has passed, returning their deposit indices.
     ///
-    /// Iterates through all assignments and reassigns those whose fulfillment deadlines
-    /// have passed (current height >= fulfillment_deadline). Each expired assignment is
-    /// reassigned using the provided seed for deterministic random operator selection.
-    ///
-    /// This method handles bulk reassignment of expired assignments, ensuring that
-    /// withdrawals don't get stuck due to unresponsive operators. If any individual
-    /// reassignment fails (e.g., no eligible operators), the entire operation fails
-    /// and returns an error.
-    ///
-    /// # Parameters
-    ///
-    /// - `current_active_operators` - Bitmap of currently active operator indices
-    /// - `l1_block` - The L1 block commitment used to derive the current height, seed, and new
-    ///   fulfillment deadline
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(Vec<u32>)` - Vector of deposit indices that were successfully reassigned
-    /// - `Err(WithdrawalCommandError)` - If any reassignment failed due to lack of eligible
-    ///   operators
+    /// Keeps withdrawals from stalling on unresponsive operators. All-or-nothing: if any expired
+    /// assignment has no eligible operator, the whole call errors.
     pub fn reassign_expired_assignments(
         &mut self,
         current_active_operators: &OperatorBitmap,
         l1_block: &L1BlockCommitment,
-    ) -> Result<Vec<u32>, WithdrawalCommandError> {
+    ) -> Result<Vec<u32>, WithdrawalAssignmentError> {
         let mut reassigned_withdrawals = Vec::new();
 
         let current_height = l1_block.height();
         let seed = *l1_block.blkid();
-        let new_deadline = self.assignment_duration as u32 + current_height;
+        let new_deadline = self.calculate_deadline(current_height);
 
         // Using iter_mut since we're only modifying non-sorting fields
         for assignment in self
@@ -435,42 +375,25 @@ impl AssignmentTable {
         Ok(reassigned_withdrawals)
     }
 
-    /// Creates and adds a new withdrawal assignment.
-    ///
-    /// This creates a new assignment by randomly selecting operators from the current active set
-    /// and calculating the fulfillment deadline based on the current L1 block height.
-    ///
-    /// # Arguments
-    ///
-    /// * `deposit_entry` - The deposit that will be used to fulfill this withdrawal
-    /// * `withdrawal_cmd` - The withdrawal command to be assigned
-    /// * `current_active_operators` - Bitmap of currently active operators eligible for assignment
-    /// * `l1_block` - The L1 block commitment used to anchor the assignment and calculate the
-    ///   deadline
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` if the assignment was created and added successfully, or an error if
-    /// the assignment creation failed (e.g., no operators available).
+    /// Builds an assignment for the deposit (see [`AssignmentEntry::create`]) and inserts it,
+    /// deriving the fulfillment deadline from the current L1 height and the assignment duration.
     pub fn add_new_assignment(
         &mut self,
         deposit_entry: DepositEntry,
-        withdrawal_cmd: WithdrawalCommand,
+        withdrawal_intent: WithdrawalIntent,
+        operator_fee: BitcoinAmount,
         current_active_operators: &OperatorBitmap,
         l1_block: &L1BlockCommitment,
-        selected_operator: OperatorSelection,
-    ) -> Result<(), WithdrawalCommandError> {
-        // Create assignment with deadline calculated from current block height + assignment
-        // duration
-        let fulfillment_deadline = l1_block.height() + self.assignment_duration as u32;
+    ) -> Result<(), WithdrawalAssignmentError> {
+        let fulfillment_deadline = self.calculate_deadline(l1_block.height());
 
-        let entry = AssignmentEntry::create_with_random_assignment(
+        let entry = AssignmentEntry::create(
             deposit_entry,
-            withdrawal_cmd,
+            withdrawal_intent,
+            operator_fee,
             fulfillment_deadline,
             current_active_operators,
             *l1_block.blkid(),
-            selected_operator,
         )?;
 
         self.assignments.insert(entry);
@@ -480,30 +403,31 @@ impl AssignmentTable {
 
 #[cfg(test)]
 mod tests {
-    use strata_asm_proto_bridge_v1_types::OperatorBitmapError;
+    use strata_asm_proto_bridge_v1_types::{OperatorBitmapError, OperatorSelection};
     use strata_identifiers::{L1BlockId, L1Height};
     use strata_test_utils_arb::ArbitraryGenerator;
 
     use super::*;
 
     #[test]
-    fn test_create_with_random_assignment_success() {
+    fn test_create_success() {
         let mut arb = ArbitraryGenerator::new();
         let deposit_entry: DepositEntry = arb.generate();
-        let withdrawal_cmd: WithdrawalCommand = arb.generate();
+        let withdrawal_intent: WithdrawalIntent = arb.generate();
+        let operator_fee: BitcoinAmount = arb.generate();
         let fulfillment_deadline: L1Height = 100;
         let seed: L1BlockId = arb.generate();
 
         // Use the deposit's notary operators as active operators
         let current_active_operators = deposit_entry.notary_operators().clone();
 
-        let result = AssignmentEntry::create_with_random_assignment(
+        let result = AssignmentEntry::create(
             deposit_entry.clone(),
-            withdrawal_cmd.clone(),
+            withdrawal_intent.clone(),
+            operator_fee,
             fulfillment_deadline,
             &current_active_operators,
             seed,
-            OperatorSelection::any(),
         );
 
         assert!(result.is_ok());
@@ -511,7 +435,11 @@ mod tests {
 
         // Verify assignment properties
         assert_eq!(assignment.deposit_idx(), deposit_entry.idx());
-        assert_eq!(assignment.withdrawal_command(), &withdrawal_cmd);
+        assert_eq!(
+            assignment.withdrawal_output(),
+            &withdrawal_intent.to_output()
+        );
+        assert_eq!(assignment.operator_fee(), operator_fee);
         assert_eq!(assignment.fulfillment_deadline(), fulfillment_deadline);
         assert!(current_active_operators.is_active(assignment.current_assignee()));
         assert_eq!(assignment.previous_assignees.active_count(), 0);
@@ -529,24 +457,26 @@ mod tests {
             }
         };
 
-        let withdrawal_cmd: WithdrawalCommand = arb.generate();
+        let mut withdrawal_intent: WithdrawalIntent = arb.generate();
+        let operator_fee: BitcoinAmount = arb.generate();
         let fulfillment_deadline: L1Height = 100;
         let seed: L1BlockId = arb.generate();
         let current_active_operators = deposit_entry.notary_operators().clone();
 
-        // Pick the second active operator
+        // Prefer the second active operator.
         let selected_idx = current_active_operators
             .active_indices()
             .nth(1)
             .expect("at least 3 active operators");
+        withdrawal_intent.selected_operator = OperatorSelection::specific(selected_idx);
 
-        let assignment = AssignmentEntry::create_with_random_assignment(
+        let assignment = AssignmentEntry::create(
             deposit_entry,
-            withdrawal_cmd,
+            withdrawal_intent,
+            operator_fee,
             fulfillment_deadline,
             &current_active_operators,
             seed,
-            OperatorSelection::specific(selected_idx),
         )
         .unwrap();
 
@@ -563,21 +493,23 @@ mod tests {
             }
         };
 
-        let withdrawal_cmd: WithdrawalCommand = arb.generate();
+        let mut withdrawal_intent: WithdrawalIntent = arb.generate();
+        let operator_fee: BitcoinAmount = arb.generate();
         let fulfillment_deadline: L1Height = 100;
         let seed: L1BlockId = arb.generate();
         let current_active_operators = deposit_entry.notary_operators().clone();
 
-        // Use an out-of-range index that won't be eligible
+        // Prefer an out-of-range index that won't be eligible.
         let bogus_idx = current_active_operators.len() as u32 + 100;
+        withdrawal_intent.selected_operator = OperatorSelection::specific(bogus_idx);
 
-        let assignment = AssignmentEntry::create_with_random_assignment(
+        let assignment = AssignmentEntry::create(
             deposit_entry,
-            withdrawal_cmd,
+            withdrawal_intent,
+            operator_fee,
             fulfillment_deadline,
             &current_active_operators,
             seed,
-            OperatorSelection::specific(bogus_idx),
         )
         .unwrap();
 
@@ -588,23 +520,24 @@ mod tests {
     }
 
     #[test]
-    fn test_create_with_random_assignment_no_eligible_operators() {
+    fn test_create_no_eligible_operators() {
         let mut arb = ArbitraryGenerator::new();
         let deposit_entry: DepositEntry = arb.generate();
-        let withdrawal_cmd: WithdrawalCommand = arb.generate();
+        let withdrawal_intent: WithdrawalIntent = arb.generate();
+        let operator_fee: BitcoinAmount = arb.generate();
         let fulfillment_deadline: L1Height = 100;
         let seed: L1BlockId = arb.generate();
 
         // Empty active operators list
         let current_active_operators = OperatorBitmap::new_empty();
 
-        let err = AssignmentEntry::create_with_random_assignment(
+        let err = AssignmentEntry::create(
             deposit_entry.clone(),
-            withdrawal_cmd,
+            withdrawal_intent,
+            operator_fee,
             fulfillment_deadline,
             &current_active_operators,
             seed,
-            OperatorSelection::any(),
         )
         .unwrap_err();
 
@@ -628,7 +561,8 @@ mod tests {
             }
         };
 
-        let withdrawal_cmd: WithdrawalCommand = arb.generate();
+        let withdrawal_intent: WithdrawalIntent = arb.generate();
+        let operator_fee: BitcoinAmount = arb.generate();
         let fulfillment_deadline: L1Height = 100;
         let seed1: L1BlockId = arb.generate();
         let seed2: L1BlockId = arb.generate();
@@ -636,13 +570,13 @@ mod tests {
         // Use the deposit's notary operators as active operators
         let current_active_operators = deposit_entry.notary_operators().clone();
 
-        let mut assignment = AssignmentEntry::create_with_random_assignment(
+        let mut assignment = AssignmentEntry::create(
             deposit_entry,
-            withdrawal_cmd,
+            withdrawal_intent,
+            operator_fee,
             fulfillment_deadline,
             &current_active_operators,
             seed1,
-            OperatorSelection::any(),
         )
         .unwrap();
 
@@ -670,20 +604,21 @@ mod tests {
         deposit_entry =
             DepositEntry::new(deposit_entry.idx(), operators, deposit_entry.amt()).unwrap();
 
-        let withdrawal_cmd: WithdrawalCommand = arb.generate();
+        let withdrawal_intent: WithdrawalIntent = arb.generate();
+        let operator_fee: BitcoinAmount = arb.generate();
         let fulfillment_deadline: L1Height = 100;
         let seed1: L1BlockId = arb.generate();
         let seed2: L1BlockId = arb.generate();
 
         let current_active_operators = OperatorBitmap::new_with_size(1, true); // Single operator with index 0
 
-        let mut assignment = AssignmentEntry::create_with_random_assignment(
+        let mut assignment = AssignmentEntry::create(
             deposit_entry,
-            withdrawal_cmd,
+            withdrawal_intent,
+            operator_fee,
             fulfillment_deadline,
             &current_active_operators,
             seed1,
-            OperatorSelection::any(),
         )
         .unwrap();
 
@@ -709,7 +644,8 @@ mod tests {
             }
         };
 
-        let withdrawal_cmd: WithdrawalCommand = arb.generate();
+        let withdrawal_intent: WithdrawalIntent = arb.generate();
+        let operator_fee: BitcoinAmount = arb.generate();
         let initial_deadline: L1Height = 100;
         let seed1: L1BlockId = arb.generate();
         let seed2: L1BlockId = arb.generate();
@@ -717,13 +653,13 @@ mod tests {
         // Use the deposit's notary operators as active operators
         let current_active_operators = deposit_entry.notary_operators().clone();
 
-        let mut assignment = AssignmentEntry::create_with_random_assignment(
+        let mut assignment = AssignmentEntry::create(
             deposit_entry,
-            withdrawal_cmd,
+            withdrawal_intent,
+            operator_fee,
             initial_deadline,
             &current_active_operators,
             seed1,
-            OperatorSelection::any(),
         )
         .unwrap();
 
@@ -750,18 +686,19 @@ mod tests {
 
         let mut arb = ArbitraryGenerator::new();
         let deposit_entry: DepositEntry = arb.generate();
-        let withdrawal_cmd: WithdrawalCommand = arb.generate();
+        let withdrawal_intent: WithdrawalIntent = arb.generate();
+        let operator_fee: BitcoinAmount = arb.generate();
         let fulfillment_deadline: L1Height = 100;
         let seed: L1BlockId = arb.generate();
         let current_active_operators = deposit_entry.notary_operators().clone();
 
-        let assignment = AssignmentEntry::create_with_random_assignment(
+        let assignment = AssignmentEntry::create(
             deposit_entry.clone(),
-            withdrawal_cmd,
+            withdrawal_intent,
+            operator_fee,
             fulfillment_deadline,
             &current_active_operators,
             seed,
-            OperatorSelection::any(),
         )
         .unwrap();
 
@@ -806,16 +743,17 @@ mod tests {
         )
         .unwrap();
 
-        let withdrawal_cmd1: WithdrawalCommand = arb.generate();
+        let withdrawal_intent1: WithdrawalIntent = arb.generate();
+        let operator_fee1: BitcoinAmount = arb.generate();
         let expired_deadline: L1Height = 100; // Less than current_height
 
-        let expired_assignment = AssignmentEntry::create_with_random_assignment(
+        let expired_assignment = AssignmentEntry::create(
             deposit_entry1.clone(),
-            withdrawal_cmd1,
+            withdrawal_intent1,
+            operator_fee1,
             expired_deadline,
             &current_active_operators,
             seed,
-            OperatorSelection::any(),
         )
         .unwrap();
 
@@ -832,16 +770,17 @@ mod tests {
         )
         .unwrap();
 
-        let withdrawal_cmd2: WithdrawalCommand = arb.generate();
+        let withdrawal_intent2: WithdrawalIntent = arb.generate();
+        let operator_fee2: BitcoinAmount = arb.generate();
         let future_deadline: L1Height = 200; // Greater than current_height
 
-        let future_assignment = AssignmentEntry::create_with_random_assignment(
+        let future_assignment = AssignmentEntry::create(
             deposit_entry2.clone(),
-            withdrawal_cmd2,
+            withdrawal_intent2,
+            operator_fee2,
             future_deadline,
             &current_active_operators,
             seed,
-            OperatorSelection::any(),
         )
         .unwrap();
 
@@ -911,14 +850,15 @@ mod tests {
             let deposit_entry =
                 DepositEntry::new(idx, current_active_operators.clone(), arb_entry.amt()).unwrap();
 
-            let withdrawal_cmd: WithdrawalCommand = arb.generate();
-            let assignment = AssignmentEntry::create_with_random_assignment(
+            let withdrawal_intent: WithdrawalIntent = arb.generate();
+            let operator_fee: BitcoinAmount = arb.generate();
+            let assignment = AssignmentEntry::create(
                 deposit_entry,
-                withdrawal_cmd,
+                withdrawal_intent,
+                operator_fee,
                 expired_deadline,
                 &current_active_operators,
                 initial_seed,
-                OperatorSelection::any(),
             )
             .unwrap();
 
