@@ -2,7 +2,7 @@
     "magic": "ALPN",
     "anchor": {
         "block": {
-            "height": 8395,
+            "height": 9026,
             "blkid": "<block_hash>"
         },
         "next_target": 0,

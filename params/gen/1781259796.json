@@ -2,8 +2,8 @@
     "magic": "ALPN",
     "anchor": {
         "block": {
-            "height": 8395,
-            "blkid": "0000000fac7a43f235c9bad64e7db2f154c9a4c52d73bfe2972cea8cd0924ca4"
+            "height": 9026,
+            "blkid": "0000000cb97c82300429277c2a264301500825c78655e20db4d2f4a556807141"
         },
         "next_target": 487979077,
         "epoch_start_timestamp": 1780826097,
@@ -64,7 +64,7 @@
             "Checkpoint": {
                 "sequencer_predicate": "AlwaysAccept",
                 "checkpoint_predicate": "AlwaysAccept",
-                "genesis_l1_height": 8395,
+                "genesis_l1_height": 9026,
                 "genesis_ol_blkid": "0000000000000000000000000000000000000000000000000000000000000000"
             }
         },
