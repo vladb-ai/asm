@@ -8218,7 +8218,9 @@ dependencies = [
 name = "strata-checkpoint-verification"
 version = "0.1.0"
 dependencies = [
+ "bitcoin",
  "bitcoin-bosd 0.10.0",
+ "hex",
  "ssz",
  "ssz_codegen",
  "ssz_derive",
@@ -8227,6 +8229,7 @@ dependencies = [
  "strata-asm-manifest-types",
  "strata-asm-params",
  "strata-asm-proto-bridge-v1-types",
+ "strata-asm-proto-checkpoint-txs",
  "strata-asm-proto-checkpoint-types",
  "strata-btc-types",
  "strata-codec",

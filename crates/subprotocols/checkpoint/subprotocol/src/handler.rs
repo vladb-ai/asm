@@ -28,7 +28,7 @@ pub(crate) fn handle_checkpoint_tx(
     verified_aux_data: &VerifiedAuxData,
     relayer: &mut impl MsgRelayer,
 ) {
-    let Ok(envelope) = extract_checkpoint_from_envelope(tx) else {
+    let Ok(envelope) = extract_checkpoint_from_envelope(tx.tx()) else {
         logging::warn!("failed to extract checkpoint payload from envelope, ignoring");
         return;
     };

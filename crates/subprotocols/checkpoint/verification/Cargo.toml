@@ -33,3 +33,6 @@ ssz_codegen.workspace = true
 
 [dev-dependencies]
 strata-test-utils-checkpoint.workspace = true
+strata-asm-proto-checkpoint-txs.workspace = true
+hex.workspace = true
+bitcoin.workspace = true

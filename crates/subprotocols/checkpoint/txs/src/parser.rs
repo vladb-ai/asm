@@ -1,5 +1,4 @@
-use bitcoin::ScriptBuf;
-use strata_asm_common::TxInputRef;
+use bitcoin::{ScriptBuf, Transaction};
 use strata_asm_proto_checkpoint_types::CheckpointPayload;
 use strata_codec::decode_buf_exact;
 use strata_codec_utils::CodecSsz;
@@ -26,9 +25,8 @@ pub struct EnvelopeCheckpoint {
 /// - Parses the envelope container to extract the pubkey and payload chunks.
 /// - Decodes the payload from `CodecSsz<CheckpointPayload>` format.
 pub fn extract_checkpoint_from_envelope(
-    tx: &TxInputRef<'_>,
+    bitcoin_tx: &Transaction,
 ) -> CheckpointTxResult<EnvelopeCheckpoint> {
-    let bitcoin_tx = tx.tx();
     if bitcoin_tx.input.is_empty() {
         return Err(CheckpointTxError::MissingInputs);
     }

@@ -44,7 +44,7 @@ impl Subprotocol for CheckpointSubprotocol {
     ) {
         for tx in txs {
             if tx.tag().tx_type() == OL_STF_CHECKPOINT_TX_TYPE {
-                match extract_checkpoint_from_envelope(tx) {
+                match extract_checkpoint_from_envelope(tx.tx()) {
                     Ok(envelope) => {
                         // Skip request when the checkpoint covers no new L1 blocks
                         // (zero L1 progress). Mirrors the `CheckpointL1Range::Empty`
