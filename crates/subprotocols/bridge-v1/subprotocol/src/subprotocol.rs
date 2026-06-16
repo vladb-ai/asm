@@ -6,7 +6,7 @@
 use strata_asm_common::{
     AsmLogEntry, AuxRequestCollector, HeaderVerificationState, MsgRelayer, Subprotocol,
     SubprotocolId, TxInputRef, VerifiedAuxData,
-    logging::{error, info},
+    logging::{debug, error, info},
 };
 use strata_asm_logs::ExportExtraDataUpdate;
 use strata_asm_params::BridgeV1InitConfig;
@@ -91,10 +91,12 @@ impl Subprotocol for BridgeV1Subproto {
                 continue;
             };
             match handle_parsed_tx(state, parsed_tx, verified_aux_data, relayer) {
-                // `tx_id` is computed inside macro, because logging is compiled to noop in ZkVM
-                Ok(()) => info!(tx_id = %tx.tx().compute_txid(), "Successfully processed tx"),
+                // `handle_parsed_tx` already emits a type-specific info log on success, so this
+                // is only a coarse trace marker. `txid` is computed inside the macro, because
+                // logging is compiled to noop in ZkVM.
+                Ok(()) => debug!(txid = %tx.tx().compute_txid(), "Processed bridge tx"),
                 Err(e) => {
-                    error!(tx_id = %tx.tx().compute_txid(), error = %e, "Failed to process tx")
+                    error!(txid = %tx.tx().compute_txid(), error = %e, "Failed to process bridge tx")
                 }
             }
         }
@@ -102,17 +104,26 @@ impl Subprotocol for BridgeV1Subproto {
         // After processing all transactions, reassign expired assignments
         match state.reassign_expired_assignments(&header_vs.last_verified_block) {
             Ok(reassigned_deposits) => {
-                info!(
-                    count = reassigned_deposits.len(),
-                    deposits = ?reassigned_deposits,
-                    "Successfully reassigned expired assignments"
-                );
+                // Per-deposit detail is logged inside `reassign_expired_assignments`; only emit a
+                // summary when something actually happened to avoid a `count = 0` line every block.
+                if !reassigned_deposits.is_empty() {
+                    info!(
+                        count = reassigned_deposits.len(),
+                        deposits = ?reassigned_deposits,
+                        "Reassigned expired assignments"
+                    );
+                }
             }
             Err(e) => {
                 // PANIC: Failure to reassign expired assignments indicates a violation of the
                 // bridge's fundamental 1/N honesty assumption. This means no operators remain
                 // available to fulfill withdrawals, representing an unrecoverable protocol breach
                 // that poses significant risk of fund loss.
+                error!(
+                    l1_height = header_vs.last_verified_block.height(),
+                    error = %e,
+                    "Failed to reassign expired assignments; 1/N honesty assumption violated"
+                );
                 panic!("Failed to reassign expired assignments {e}");
             }
         }
@@ -158,6 +169,11 @@ impl Subprotocol for BridgeV1Subproto {
                     if let Err(e) = state.create_batch_withdrawal_assignments(payload, l1ref) {
                         // PANIC: Withdrawal assignment failure indicates catastrophic system
                         // compromise.
+                        error!(
+                            l1_height = l1ref.height(),
+                            error = %e,
+                            "Failed to create withdrawal assignment"
+                        );
                         panic!("Failed to create withdrawal assignment: {e}",);
                     }
                 }
@@ -173,13 +189,19 @@ impl Subprotocol for BridgeV1Subproto {
                 }
 
                 BridgeIncomingMsg::UpdateSafeHarbourAddress(address) => {
-                    info!("Updating the safe harbour address from admin subprotocol");
-                    state.update_safe_harbour_address(address.clone());
+                    // Only claim success when the update actually applied; rejection (safe harbour
+                    // already activated) is warned inside `update_safe_harbour_address`.
+                    if state.update_safe_harbour_address(address.clone()) {
+                        info!("Updated safe harbour address from admin subprotocol");
+                    }
                 }
 
                 BridgeIncomingMsg::Defcon(_) => {
-                    info!("Activating safe harbour on Defcon signal from admin subprotocol");
                     state.activate_safe_harbour();
+                    info!(
+                        active_address = ?state.safe_harbour().address(),
+                        "Activated safe harbour on Defcon signal from admin subprotocol"
+                    );
                 }
             }
         }

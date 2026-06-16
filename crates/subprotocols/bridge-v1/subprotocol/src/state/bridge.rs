@@ -1,5 +1,5 @@
 use ssz_derive::{Decode, Encode};
-use strata_asm_common::logging::{info, warn};
+use strata_asm_common::logging::{debug, info, warn};
 use strata_asm_params::BridgeV1InitConfig;
 use strata_asm_proto_bridge_v1_txs::{deposit::DepositInfo, errors::Mismatch};
 use strata_asm_proto_bridge_v1_types::{
@@ -112,11 +112,14 @@ impl BridgeV1State {
     /// Updates the safe harbour address. Returns `false` if the safe harbour
     /// is already activated and the update was rejected.
     pub fn update_safe_harbour_address(&mut self, new_address: SafeHarbourAddress) -> bool {
-        let updated = self.safe_harbour.update_address(new_address);
-        if !updated {
-            warn!("Safe harbour address update rejected: already activated");
+        if self.safe_harbour.is_activated() {
+            warn!(
+                ?new_address,
+                "Safe harbour address update rejected: already activated"
+            );
+            return false;
         }
-        updated
+        self.safe_harbour.update_address(new_address)
     }
 
     /// Processes a deposit transaction by validating and adding it to the deposits table.
@@ -192,7 +195,6 @@ impl BridgeV1State {
         }
 
         let selected_operator = withdrawal_intent.selected_operator();
-        let selected_operator_raw = selected_operator.raw();
         let deposit_idx = deposit.idx();
         let amount_sat = deposit.amt().to_sat();
         let result = self.assignments.add_new_assignment(
@@ -213,7 +215,6 @@ impl BridgeV1State {
                 assignee = assignment.current_assignee(),
                 amount_sat,
                 fulfillment_deadline = assignment.fulfillment_deadline(),
-                selected_operator_raw,
                 selected_operator = %selected_operator,
                 "Created withdrawal assignment",
             );
@@ -245,6 +246,12 @@ impl BridgeV1State {
         }
 
         let n = amt / denom;
+        debug!(
+            total_amount_sat = amt,
+            denomination_sat = denom,
+            assignments = n,
+            "Decomposing batch withdrawal"
+        );
         let single_intent = WithdrawalIntent::new(
             withdrawal_intent.destination().clone(),
             self.denomination,
