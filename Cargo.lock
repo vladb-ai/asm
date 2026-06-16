@@ -793,7 +793,6 @@ dependencies = [
  "anyhow",
  "borsh",
  "sled",
- "ssz",
  "strata-asm-common",
  "strata-identifiers",
  "strata-merkle",
@@ -4306,7 +4305,9 @@ name = "moho-types"
 version = "0.1.0"
 source = "git+https://github.com/alpenlabs/moho?tag=v0.3.0-rc.1#8e8f70f6ac865d9dbaf01f34635d5712e632f6be"
 dependencies = [
+ "const-hex",
  "hex",
+ "serde",
  "sha2 0.11.0",
  "ssz",
  "ssz_codegen",
@@ -7674,6 +7675,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "strata-asm-moho-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "moho-types",
+ "proptest",
+ "sled",
+ "ssz",
+ "strata-identifiers",
+ "strata-merkle",
+ "strata-merkle-node-store",
+ "strata-predicate",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "strata-asm-moho-worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "moho-runtime-interface",
+ "moho-types",
+ "serde",
+ "strata-asm-common",
+ "strata-asm-logs",
+ "strata-asm-params",
+ "strata-asm-proof-impl",
+ "strata-asm-spec",
+ "strata-asm-worker",
+ "strata-identifiers",
+ "strata-predicate",
+ "strata-service",
+ "strata-tasks",
+ "strata-test-utils-arb",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "strata-asm-params"
 version = "0.1.0"
 dependencies = [
@@ -7698,13 +7739,10 @@ name = "strata-asm-proof-db"
 version = "0.1.0"
 dependencies = [
  "borsh",
- "moho-types",
  "proptest",
  "sled",
- "ssz",
  "strata-asm-proof-types",
  "strata-identifiers",
- "strata-predicate",
  "tempfile",
  "tokio",
  "zkaleido",
@@ -8022,7 +8060,6 @@ dependencies = [
  "k256",
  "moho-recursive-proof",
  "moho-runtime-impl",
- "moho-runtime-interface",
  "moho-types",
  "serde",
  "serde_json",
@@ -8031,7 +8068,8 @@ dependencies = [
  "sp1-verifier",
  "ssz",
  "strata-asm-common",
- "strata-asm-logs",
+ "strata-asm-moho-storage",
+ "strata-asm-moho-worker",
  "strata-asm-params",
  "strata-asm-proof-db",
  "strata-asm-proof-impl",
