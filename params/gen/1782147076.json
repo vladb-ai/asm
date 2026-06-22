@@ -3,10 +3,10 @@
     "anchor": {
         "block": {
             "height": 309951,
-            "blkid": "<block_hash>"
+            "blkid": "000000143a89d502ddaee8e51232a21e86dd008b79881b82a09d55a6f8352514"
         },
-        "next_target": 0,
-        "epoch_start_timestamp": 0,
+        "next_target": 487877124,
+        "epoch_start_timestamp": 1781198574,
         "network": "signet"
     },
     "subprotocols": [
