@@ -65,3 +65,23 @@ pub fn parse_tx(tx: &TxInputRef<'_>) -> Result<SignedPayload, AdministrationTxPa
 
     Ok(signed_payload)
 }
+
+#[cfg(test)]
+mod tests {
+    use bitcoin::{Transaction, consensus};
+    use strata_asm_proto_txs_test_utils::parse_sps50_tx;
+
+    use crate::parser::parse_tx;
+
+    #[test]
+    fn test_parse_tx() {
+        let raw_tx = hex::decode("0200000000010174d9b2e9417f91b2012fca8305db5416ac85f21c0948697ce80040d25a9da3ed0200000000fdffffff0300000000000000000a6a08414c504e000000002c030000000000002251204427bcee61c28d378b39d4a669f263253c7d43cae9996fbd0e6f526bf26206ccb533065f00000000160014f9dd9cecb47c40c9ca3174cc1bdd8613a242344302473044022044cdcaddffc7a36c39e097fd3b48030491e9545979b343d0768b3815b86843fd02204b1e0793fe82cad6d438ecc8ff5639b357a29ecff297a96ceabc7a33c1c4426c01210266855f4b4ae94a7c0a0e6ddd15bc811c70b88da092a54d563039320d95fa629e00000000").unwrap();
+        let tx: Transaction = consensus::deserialize(&raw_tx).unwrap();
+        let input = parse_sps50_tx(&tx);
+
+        let admin_tx = parse_tx(&input);
+
+        dbg!(&tx.compute_txid());
+        dbg!(&admin_tx);
+    }
+}
