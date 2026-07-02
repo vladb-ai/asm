@@ -6,9 +6,10 @@
 
 use std::sync::Arc;
 
+use anyhow::Context;
 use asm_storage::{SledAsmAuxDataDb, SledAsmManifestDb, SledAsmManifestMmrDb, SledAsmStateDb};
 use bitcoin::{Block, BlockHash, Network, block::Header};
-use bitcoind_async_client::{Client, error::ClientError, traits::Reader};
+use bitcoind_async_client::{Client, traits::Reader};
 use strata_asm_common::{AsmLogEntry, AsmManifest, AsmManifestHash, AuxData};
 use strata_asm_worker::{
     AnchorStateStore, AsmState, AuxDataStore, L1DataProvider, ManifestMmrStore, WorkerError,
@@ -71,7 +72,7 @@ impl AsmWorkerContext {
         Ok(self
             .manifest_db
             .get(blockid)
-            .map_err(|_| WorkerError::DbError)?
+            .map_err(WorkerError::DbError)?
             .map(|manifest| manifest.logs().to_vec())
             .unwrap_or_default())
     }
@@ -88,7 +89,8 @@ impl L1DataProvider for AsmWorkerContext {
                 &self.rpc_backoff,
                 || async { client.get_block(&block_hash).await },
             ))
-            .map_err(|e: ClientError| WorkerError::BtcRpc(format!("get_block({block_hash}): {e}")))
+            .with_context(|| format!("get_block({block_hash})"))
+            .map_err(WorkerError::BtcRpc)
     }
 
     fn get_l1_block_header(&self, blockid: &L1BlockId) -> WorkerResult<Header> {
@@ -101,9 +103,8 @@ impl L1DataProvider for AsmWorkerContext {
                 &self.rpc_backoff,
                 || async { client.get_block_header(&block_hash).await },
             ))
-            .map_err(|e: ClientError| {
-                WorkerError::BtcRpc(format!("get_block_header({block_hash}): {e}"))
-            })
+            .with_context(|| format!("get_block_header({block_hash})"))
+            .map_err(WorkerError::BtcRpc)
     }
 
     fn get_l1_block_header_at_height(&self, height: u64) -> WorkerResult<Header> {
@@ -116,9 +117,8 @@ impl L1DataProvider for AsmWorkerContext {
                 &self.rpc_backoff,
                 || async { client.get_block_hash(height).await },
             ))
-            .map_err(|e: ClientError| {
-                WorkerError::BtcRpc(format!("get_block_hash({height}): {e}"))
-            })?;
+            .with_context(|| format!("get_block_hash({height})"))
+            .map_err(WorkerError::BtcRpc)?;
         self.runtime_handle
             .block_on(retry_with_backoff_async(
                 "btc_get_block_header",
@@ -126,9 +126,8 @@ impl L1DataProvider for AsmWorkerContext {
                 &self.rpc_backoff,
                 || async { client.get_block_header(&block_hash).await },
             ))
-            .map_err(|e: ClientError| {
-                WorkerError::BtcRpc(format!("get_block_header({block_hash}): {e}"))
-            })
+            .with_context(|| format!("get_block_header({block_hash})"))
+            .map_err(WorkerError::BtcRpc)
     }
 
     fn get_l1_block_height(&self, blockid: &L1BlockId) -> WorkerResult<u64> {
@@ -141,9 +140,8 @@ impl L1DataProvider for AsmWorkerContext {
                 &self.rpc_backoff,
                 || async { client.get_block_height(&block_hash).await },
             ))
-            .map_err(|e: ClientError| {
-                WorkerError::BtcRpc(format!("get_block_height({block_hash}): {e}"))
-            })
+            .with_context(|| format!("get_block_height({block_hash})"))
+            .map_err(WorkerError::BtcRpc)
     }
 
     fn get_network(&self) -> WorkerResult<Network> {
@@ -155,7 +153,8 @@ impl L1DataProvider for AsmWorkerContext {
                 &self.rpc_backoff,
                 || async { client.network().await },
             ))
-            .map_err(|e: ClientError| WorkerError::BtcRpc(format!("network: {e}")))
+            .context("network")
+            .map_err(WorkerError::BtcRpc)
     }
 
     fn get_bitcoin_tx(&self, txid: &BitcoinTxid) -> WorkerResult<RawBitcoinTx> {
@@ -173,9 +172,8 @@ impl L1DataProvider for AsmWorkerContext {
                 },
             ))
             .map(|resp| RawBitcoinTx::from(resp.0))
-            .map_err(|e: ClientError| {
-                WorkerError::BtcRpc(format!("get_raw_transaction({bitcoin_txid}): {e}"))
-            })
+            .with_context(|| format!("get_raw_transaction({bitcoin_txid})"))
+            .map_err(WorkerError::BtcRpc)
     }
 }
 
@@ -189,11 +187,7 @@ impl AnchorStateStore for AsmWorkerContext {
     // re-committed anchor silently drop a block's export entries and predicate
     // update, desyncing its persisted MohoState from the proven one.
     fn get_latest_asm_state(&self) -> WorkerResult<Option<(L1BlockCommitment, AsmState)>> {
-        let Some(anchor) = self
-            .state_db
-            .get_latest()
-            .map_err(|_| WorkerError::DbError)?
-        else {
+        let Some(anchor) = self.state_db.get_latest().map_err(WorkerError::DbError)? else {
             return Ok(None);
         };
         let blockid = anchor.chain_view.pow_state.last_verified_block;
@@ -205,7 +199,7 @@ impl AnchorStateStore for AsmWorkerContext {
         let anchor = self
             .state_db
             .get(blockid)
-            .map_err(|_| WorkerError::DbError)?
+            .map_err(WorkerError::DbError)?
             .ok_or(WorkerError::MissingAsmState(*blockid.blkid()))?;
         let logs = self.manifest_logs(blockid)?;
         Ok(AsmState::new(anchor, logs))
@@ -218,7 +212,7 @@ impl AnchorStateStore for AsmWorkerContext {
     ) -> WorkerResult<()> {
         self.state_db
             .put(state.state())
-            .map_err(|_| WorkerError::DbError)?;
+            .map_err(WorkerError::DbError)?;
 
         Ok(())
     }
@@ -228,17 +222,17 @@ impl ManifestMmrStore for AsmWorkerContext {
     fn put_manifest(&self, manifest: AsmManifest) -> WorkerResult<()> {
         self.manifest_db
             .put(&manifest)
-            .map_err(|_| WorkerError::DbError)
+            .map_err(WorkerError::DbError)
     }
 
     fn put_manifest_hash(&self, height: u64, hash: AsmManifestHash) -> WorkerResult<()> {
         self.mmr_db
             .put_leaf(height, hash)
-            .map_err(|_| WorkerError::DbError)
+            .map_err(WorkerError::DbError)
     }
 
     fn manifest_mmr_leaf_count(&self) -> WorkerResult<u64> {
-        self.mmr_db.leaf_count().map_err(|_| WorkerError::DbError)
+        self.mmr_db.leaf_count().map_err(WorkerError::DbError)
     }
 
     fn generate_mmr_proof_at(
@@ -254,22 +248,20 @@ impl ManifestMmrStore for AsmWorkerContext {
     fn get_manifest_hash(&self, index: u64) -> WorkerResult<AsmManifestHash> {
         self.mmr_db
             .get_leaf(index)
-            .map_err(|_| WorkerError::DbError)?
+            .map_err(WorkerError::DbError)?
             .ok_or(WorkerError::ManifestHashNotFound { index })
     }
 }
 
 impl AuxDataStore for AsmWorkerContext {
     fn store_aux_data(&self, blockid: &L1BlockCommitment, data: &AuxData) -> WorkerResult<()> {
-        self.aux_db
-            .put(blockid, data)
-            .map_err(|_| WorkerError::DbError)
+        self.aux_db.put(blockid, data).map_err(WorkerError::DbError)
     }
 
     fn get_aux_data(&self, blockid: &L1BlockCommitment) -> WorkerResult<AuxData> {
         self.aux_db
             .get(blockid)
-            .map_err(|_| WorkerError::DbError)?
+            .map_err(WorkerError::DbError)?
             .ok_or(WorkerError::MissingAuxData(*blockid))
     }
 }
