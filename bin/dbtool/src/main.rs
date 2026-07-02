@@ -4,10 +4,10 @@
 //! databases, modeled on alpen's `strata-dbtool` but built in the layered
 //! grammar STR-3564 recommends rather than a flat verb-prefixed surface.
 //!
-//! This first increment covers the `asm` domain backed by the **storage DB**
-//! (anchor state, aux data, manifests, and the manifest-hash MMR). The
-//! proof-DB-backed resources (`asm proof`, `moho …`, `proof …`) land in a
-//! follow-up; see `README.md`.
+//! Covers the `asm` domain (storage DB: anchor state, aux data, manifests, and
+//! the manifest-hash MMR) and the `moho` domain (`moho state` in the proof DB,
+//! `moho export-entries` in the storage DB). The remaining proof-DB resources
+//! (`proof …`) land in a follow-up; see `README.md`.
 //!
 //! Output is JSON on stdout; errors go to stderr. The tool opens sled read-only
 //! by intent: mutating verbs refuse to run without `--write`. sled takes an
@@ -50,6 +50,15 @@ fn run() -> anyhow::Result<()> {
         Domain::Asm { resource } => {
             let db = db::open_storage(db)?;
             cmd::run_asm(&db, resource, write)?
+        }
+        Domain::Moho { resource } => {
+            // `moho state` reads the proof DB; `moho export-entries` the storage
+            // DB. Pick the opener before touching sled.
+            let sled_db = match cmd::moho_target(&resource) {
+                cmd::MohoDb::Proof => db::open_proof(db)?,
+                cmd::MohoDb::Storage => db::open_storage(db)?,
+            };
+            cmd::run_moho(&sled_db, resource, write)?
         }
     };
 
