@@ -1,0 +1,47 @@
+name: AI Security Review
+
+permissions:
+  contents: read
+  pull-requests: write # Needed for leaving PR review comments
+  id-token: write # Needed by claude-code-action's OIDC flow
+
+on:
+  pull_request:
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          # Subscription / account auth (Claude Pro/Max) instead of an API key.
+          # Generate with `claude setup-token` and add as a repo secret.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Use the built-in Actions token for PR ops so no Claude GitHub App install is required.
+          github_token: ${{ github.token }}
+          use_sticky_comment: true
+          prompt: |
+            Perform a security review of pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            Run `gh pr diff ${{ github.event.pull_request.number }}` to get the changes, and read the surrounding code for context.
+
+            Report only real, exploitable vulnerabilities introduced or exposed by this diff:
+            - Injection (SQL / command / template), unsafe deserialization, path traversal, SSRF
+            - Broken authn/authz, missing access checks, insecure direct object references
+            - Cryptographic misuse, weak randomness, secret / credential exposure
+            - Memory safety, integer overflow/underflow, unchecked arithmetic, panics on untrusted input (watch Rust `unsafe`)
+            - Input-validation gaps, unsafe error handling, resource exhaustion / DoS
+
+            For each finding report: `file:line`, severity (Critical/High/Medium/Low), a concrete exploit scenario, and a concrete fix.
+            Favor precision over recall — do not report style issues or speculative concerns. If there are no security issues, say so briefly.
+
+            When done, post your review as exactly ONE pull-request comment by running:
+            `gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "<your review as markdown>"`
+            Start the comment with the heading "## 🔒 AI Security Review".
+          claude_args: |
+            --max-turns 40
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(gh pr comment:*),Bash(cat:*),Bash(ls:*),Bash(grep:*),Bash(rg:*),Bash(find:*),Bash(head:*),Bash(tail:*),Bash(sed:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Read,Grep,Glob"
