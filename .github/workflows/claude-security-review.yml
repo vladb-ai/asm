@@ -3,6 +3,7 @@ name: AI Security Review
 permissions:
   contents: read
   pull-requests: write # Needed for leaving PR review comments
+  id-token: write # Needed by claude-code-action's OIDC flow
 
 on:
   pull_request:
@@ -21,6 +22,8 @@ jobs:
           # Subscription / account auth (Claude Pro/Max) instead of an API key.
           # Generate with `claude setup-token` and add as a repo secret.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Use the built-in Actions token for PR ops so no Claude GitHub App install is required.
+          github_token: ${{ github.token }}
           use_sticky_comment: true
           prompt: |
             Perform a security review of pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
