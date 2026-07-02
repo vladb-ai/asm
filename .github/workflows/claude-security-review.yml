@@ -49,9 +49,11 @@ jobs:
             - Input-validation gaps, unsafe error handling, resource exhaustion / DoS
 
             For each finding report: `file:line`, severity (Critical/High/Medium/Low), a concrete exploit scenario, and a concrete fix.
-            Favor precision over recall — do not report style issues or speculative concerns. If there are no security issues, say so briefly.
+            Favor precision over recall — do not report style issues or speculative concerns.
 
-            When done, post your review as exactly ONE pull-request comment by running:
+            You MUST finish by posting exactly ONE pull-request comment — even when you find nothing (in that
+            case the body is simply "No security issues found in this diff."). Posting is required and must be
+            your final action. Run:
             `gh pr comment ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --body "<your review as markdown>"`
             Start the comment with the heading "## 🔒 AI Security Review".
           claude_args: |
