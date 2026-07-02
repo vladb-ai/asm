@@ -38,6 +38,10 @@ jobs:
 
             For each finding report: `file:line`, severity (Critical/High/Medium/Low), a concrete exploit scenario, and a concrete fix.
             Favor precision over recall — do not report style issues or speculative concerns. If there are no security issues, say so briefly.
+
+            When done, post your review as exactly ONE pull-request comment by running:
+            `gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "<your review as markdown>"`
+            Start the comment with the heading "## 🔒 AI Security Review".
           claude_args: |
             --max-turns 25
-            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Read,Grep,Glob"
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(gh pr comment:*),Read,Grep,Glob"
