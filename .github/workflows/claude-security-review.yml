@@ -7,15 +7,27 @@ permissions:
 
 on:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to review (manual backfill; works for conflicting PRs)"
+        required: true
 
 jobs:
   security:
     runs-on: ubuntu-latest
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+
+      # Works for both pull_request and manual workflow_dispatch (incl. conflicting PRs).
+      - name: Check out PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checkout "$PR_NUMBER" --repo "${{ github.repository }}"
 
       - uses: anthropics/claude-code-action@v1
         with:
@@ -26,8 +38,8 @@ jobs:
           github_token: ${{ github.token }}
           use_sticky_comment: true
           prompt: |
-            Perform a security review of pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
-            Run `gh pr diff ${{ github.event.pull_request.number }}` to get the changes, and read the surrounding code for context.
+            Perform a security review of pull request #${{ env.PR_NUMBER }} in ${{ github.repository }}.
+            Run `gh pr diff ${{ env.PR_NUMBER }}` to get the changes, and read the surrounding code for context.
 
             Report only real, exploitable vulnerabilities introduced or exposed by this diff:
             - Injection (SQL / command / template), unsafe deserialization, path traversal, SSRF
@@ -40,7 +52,7 @@ jobs:
             Favor precision over recall — do not report style issues or speculative concerns. If there are no security issues, say so briefly.
 
             When done, post your review as exactly ONE pull-request comment by running:
-            `gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "<your review as markdown>"`
+            `gh pr comment ${{ env.PR_NUMBER }} --repo ${{ github.repository }} --body "<your review as markdown>"`
             Start the comment with the heading "## 🔒 AI Security Review".
           claude_args: |
             --max-turns 40
