@@ -151,4 +151,47 @@ mod tests {
             assert!(proof.verify(tx, merkle_root));
         }
     }
+
+    /// Reproduces the inclusion-proof forgery: `verify` never binds the proof to the tree
+    /// structure, so it accepts proofs of the wrong length and out-of-range positions.
+    #[test]
+    fn test_forged_inclusion_proof_is_accepted() {
+        let block = BtcMainnetSegment::load_full_block();
+        let merkle_root: Buf32 = block.header.merkle_root.to_byte_array().into();
+        let txs = &block.txdata;
+        assert!(
+            txs.len() > 1,
+            "need a multi-transaction block to demonstrate the forgery"
+        );
+
+        let coinbase = &txs[0];
+
+        // Forgery 1: a zero-length proof that claims the coinbase's own txid is the Merkle root.
+        // With no depth binding, `compute_root` just returns the leaf, so any single hash can be
+        // passed off as a whole-block root. This is the primitive behind the 64-byte node/tx
+        // second-preimage attack: an internal Merkle node presented as a leaf produces a proof
+        // shorter than the true tree depth, which the verifier cannot currently detect.
+        let empty_proof = TxidInclusionProof::new(0, vec![]);
+        let coinbase_txid = compute_txid(coinbase).to_buf32();
+        assert!(
+            empty_proof.verify(coinbase, coinbase_txid),
+            "BUG: zero-length proof was rejected — the depth-binding fix may already be present"
+        );
+
+        // Forgery 2: an out-of-range position verifies against the *real* Merkle root. Only the
+        // low `siblings.len()` bits of the position feed left/right ordering, so `position` and
+        // `position + 2^depth` compute the same root — yet the latter is not a valid leaf index.
+        let valid = TxidInclusionProof::generate(txs, 0);
+        let depth = valid.siblings().len() as u32;
+        let bogus_position = 1u32 << depth;
+        assert!(
+            bogus_position >= txs.len() as u32,
+            "bogus position should be out of range"
+        );
+        let forged_position = TxidInclusionProof::new(bogus_position, valid.siblings().to_vec());
+        assert!(
+            forged_position.verify(coinbase, merkle_root),
+            "BUG: out-of-range position was rejected — the position check may already be present"
+        );
+    }
 }
