@@ -1,8 +1,8 @@
 name: AI Security Review
 
 permissions:
-  pull-requests: write # Needed for leaving PR comments
   contents: read
+  pull-requests: write # Needed for leaving PR review comments
 
 on:
   pull_request:
@@ -14,9 +14,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 2
+          fetch-depth: 0
 
-      - uses: anthropics/claude-code-security-review@main
+      - uses: anthropics/claude-code-action@v1
         with:
-          comment-pr: true
-          claude-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Subscription / account auth (Claude Pro/Max) instead of an API key.
+          # Generate with `claude setup-token` and add as a repo secret.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          use_sticky_comment: true
+          prompt: |
+            Perform a security review of pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            Run `gh pr diff ${{ github.event.pull_request.number }}` to get the changes, and read the surrounding code for context.
+
+            Report only real, exploitable vulnerabilities introduced or exposed by this diff:
+            - Injection (SQL / command / template), unsafe deserialization, path traversal, SSRF
+            - Broken authn/authz, missing access checks, insecure direct object references
+            - Cryptographic misuse, weak randomness, secret / credential exposure
+            - Memory safety, integer overflow/underflow, unchecked arithmetic, panics on untrusted input (watch Rust `unsafe`)
+            - Input-validation gaps, unsafe error handling, resource exhaustion / DoS
+
+            For each finding report: `file:line`, severity (Critical/High/Medium/Low), a concrete exploit scenario, and a concrete fix.
+            Favor precision over recall — do not report style issues or speculative concerns. If there are no security issues, say so briefly.
+          claude_args: |
+            --max-turns 25
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Read,Grep,Glob"
