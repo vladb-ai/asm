@@ -13,9 +13,9 @@ The runner persists into two independent sled databases:
 - **Storage DB** — anchor state, aux data, full manifests, and the
   manifest-hash MMR. Backed by the `asm-storage` crate. Targeted by `asm`
   commands.
-- **Proof DB** — ASM/Moho proofs, Moho state, and the remote-prover bookkeeping.
-  Backed by `strata-asm-proof-db`. Targeted by the planned `moho`/`proof`
-  commands.
+- **Proof DB** — ASM/Moho proofs and the remote-prover bookkeeping (plus Moho
+  state, reached by the planned `moho` commands). Backed by
+  `strata-asm-prover-storage`. Targeted by `proof` commands.
 
 Each invocation opens exactly the one database its command needs, so both are
 selected with a single `--db <path>` flag — point it at whichever directory the
@@ -40,7 +40,8 @@ dbtool [--db <path>] [--pretty] [--write] <domain> <resource> <verb> [args]
   plus an `ssz_hex` blob carrying the canonical bytes losslessly. `put` consumes
   those same bytes from `--file` (raw SSZ, not the hex text), so get → put
   round-trips once you hex-decode `ssz_hex` back to bytes — see the round-trip
-  example below.
+  example below. `proof` records are borsh-encoded instead, so they carry a
+  `borsh_hex` blob in place of `ssz_hex`.
 
 ### Examples
 
@@ -66,6 +67,14 @@ dbtool --db ./data/asm --write asm state prune --after 1234
 dbtool --db ./data/asm asm manifest get 1234:6f1a...ee \
   | jq -r .ssz_hex | xxd -r -p > manifest.ssz
 dbtool --db ./data/asm --write asm manifest put --file manifest.ssz
+
+# Proofs (proof DB): latest Moho proof, and the ASM proof for a block range
+dbtool --db ./data/proof --pretty proof moho latest
+dbtool --db ./data/proof proof asm get 1234:6f1a...ee..1240:9c2b...af
+
+# Remote-prover bookkeeping: in-flight jobs and one mapping
+dbtool --db ./data/proof proof status in-progress
+dbtool --db ./data/proof proof mapping get-remote moho:1234:6f1a...ee
 ```
 
 ## Command surface
@@ -84,11 +93,24 @@ height-indexed, so the `<index>` read by `leaf`/`proof` and the `<height>`
 written by `put-leaf` are the same value — the leaf for the block at height `h`
 is leaf index `h`.
 
-### Planned (proof DB) — not yet implemented
+### `proof` (proof DB) — implemented
 
-These share the proof DB and the `strata-asm-proof-db` crate and land in a
-follow-up:
+| Resource | Verbs |
+|---|---|
+| `proof asm` | `get <range>` · `list` · `delete <range>` (w) |
+| `proof moho` | `get <commitment>` · `latest` · `list` · `delete <commitment>` (w) |
+| `proof mapping` | `get-remote <proof_id>` · `get-local <remote_id>` · `list` |
+| `proof status` | `get <remote_id>` · `list` · `in-progress` · `delete <remote_id>` (w) |
+| `proof prune` | `--before <h>` (w) |
 
-- `asm proof get/list/delete` (ASM step proofs)
-- `moho state` · `moho export-entries[-mmr]` · `moho proof`
-- `proof mapping` · `proof status` · `proof prune` (remote-prover bookkeeping)
+A `<range>` is `<commitment>` (single block) or `<commitment>..<commitment>`
+(inclusive); a `<proof_id>` is `asm:<range>` or `moho:<commitment>`; a
+`<remote_id>` is the opaque remote id as hex. All three round-trip: the string
+each verb prints copies straight back into the next command. `proof prune`
+drops ASM and Moho proofs only — the mapping and status bookkeeping are left
+untouched.
+
+### Planned — not yet implemented
+
+- `moho state` · `moho export-entries` — Moho state snapshots (proof DB) and the
+  per-container export-entry MMR (storage DB), landing in a follow-up.
