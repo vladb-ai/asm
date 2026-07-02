@@ -1,10 +1,10 @@
 [package]
-name = "strata-asm-proof-db"
+name = "strata-asm-prover-storage"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-strata-asm-proof-types.workspace = true
+strata-asm-prover-types.workspace = true
 strata-identifiers.workspace = true
 
 borsh.workspace = true

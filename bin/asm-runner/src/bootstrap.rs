@@ -5,21 +5,18 @@ use bitcoind_async_client::{Auth, Client};
 use strata_asm_moho_storage::SledMohoStateDb;
 use strata_asm_moho_worker::MohoWorkerBuilder;
 use strata_asm_params::AsmParams;
-use strata_asm_proof_db::SledProofDb;
+use strata_asm_prover_storage::SledProofDb;
+use strata_asm_prover_worker::{InputBuilder, ProofBackend, ProverWorkerBuilder};
 use strata_asm_spec::StrataAsmSpec;
 use strata_asm_worker::AsmWorkerBuilder;
 use strata_tasks::TaskExecutor;
-use tokio::{
-    runtime::{Builder as RuntimeBuilder, Handle},
-    sync::mpsc,
-    task::{self, LocalSet},
-};
+use tokio::{runtime::Handle, task};
 
 use crate::{
     block_watcher::drive_asm_from_bitcoin,
     config::{AsmRpcConfig, BitcoinConfig},
     moho_context::MohoWorkerContextImpl,
-    prover::{InputBuilder, ProofBackend, ProofOrchestrator},
+    prover_context::AsmProverContext,
     rpc_server::{AsmProofRpcDeps, run_rpc_server},
     storage::{Storage, create_storage},
     worker_context::AsmWorkerContext,
@@ -87,10 +84,7 @@ pub(crate) async fn bootstrap(
     let asm_worker = Arc::new(asm_worker);
 
     // 6. Finish orchestrator wiring if it was configured.
-    let (proof_tx, proof_rpc_deps) = if let Some((orch_config, proof_db, moho_state_db, backend)) =
-        orch_prep
-    {
-        let (tx, rx) = mpsc::unbounded_channel();
+    let proof_rpc_deps = if let Some((orch_config, proof_db, moho_state_db, backend)) = orch_prep {
         let rpc_deps = AsmProofRpcDeps {
             proof_db: proof_db.clone(),
             moho_state_db: moho_state_db.clone(),
@@ -109,7 +103,7 @@ pub(crate) async fn bootstrap(
         // (and the export-entry leaves its ExportState MMR commits to) from the
         // anchor state the ASM worker committed, and persists both to the same
         // stores the orchestrator and RPC read. Subscribe before the block
-        // watcher is spawned (step 8): the subscription has no replay, so a later
+        // watcher is spawned (step 7): the subscription has no replay, so a later
         // subscriber would miss already-committed blocks. The genesis Moho state
         // is seeded from the ASM genesis anchor during launch.
         let moho_context = MohoWorkerContextImpl::new(
@@ -121,7 +115,7 @@ pub(crate) async fn bootstrap(
             moho_state_db.clone(),
             export_entries_db.clone(),
         );
-        let _moho_worker = MohoWorkerBuilder::new()
+        let moho_worker = MohoWorkerBuilder::new()
             .with_context(moho_context)
             .with_subscription(asm_worker.subscribe_blocks())
             .with_genesis_block(params.anchor.block)
@@ -129,43 +123,48 @@ pub(crate) async fn bootstrap(
             .launch(&executor)
             .await?;
 
-        let input_builder = InputBuilder::new(
+        // The prover context wires the proof store, moho-state store, ASM
+        // anchor-state store, aux-data store, and Bitcoin client into the
+        // worker's traits.
+        let prover_ctx = AsmProverContext::new(
+            proof_db,
+            moho_state_db,
             state_db.clone(),
             aux_db.clone(),
             bitcoin_client.clone(),
-            proof_db.clone(),
-            moho_state_db,
-            params.anchor.block,
-            asm_predicate,
-            moho_predicate,
         );
-        let mut orchestrator = ProofOrchestrator::new(
-            proof_db,
-            asm_host,
-            moho_host,
-            orch_config,
-            input_builder,
-            rx,
-        );
+        let input_builder = InputBuilder::new(params.anchor.block, asm_predicate, moho_predicate);
 
-        // ZkVmRemoteProver is !Send (#[async_trait(?Send)]), so the orchestrator
-        // future cannot be spawned on a multi-threaded runtime directly. We run it
-        // on a dedicated thread with a single-threaded runtime + LocalSet.
-        executor.spawn_critical_async_with_shutdown(
-            "proof_orchestrator",
-            move |shutdown| async move {
-                task::spawn_blocking(move || {
-                    let rt = RuntimeBuilder::new_current_thread().enable_all().build()?;
-                    let local = LocalSet::new();
-                    rt.block_on(local.run_until(async move { orchestrator.run(shutdown).await }))
-                })
-                .await?
-            },
-        );
+        // Drive the prover from the *Moho* worker's commit stream, not the ASM
+        // worker's: the Moho worker emits a block only after it has persisted
+        // that block's MohoState, so any block the prover sees here already has
+        // its MohoState available for proof-input assembly. This serializes the
+        // ASM → Moho → prover chain and removes the race that existed when the
+        // prover and the Moho worker subscribed to the ASM stream independently.
+        //
+        // Subscribe before the block watcher (spawned below) starts feeding the
+        // ASM worker. The stream has no replay buffer, but commits only flow once
+        // the watcher hands the ASM worker blocks, so subscribing here misses
+        // nothing.
+        let block_subscription = moho_worker.subscribe_blocks();
 
-        (Some(tx), Some(rpc_deps))
+        // The prover proving path is now `Send` (it calls the host's
+        // `start_proving`/`get_status`/`get_proof` directly rather than the
+        // `?Send` `ZkVmRemoteProgram` wrapper), so the service runs on the
+        // standard async framework via `launch` — no dedicated thread or
+        // `LocalSet` needed.
+        let _prover_handle = ProverWorkerBuilder::new()
+            .with_context(prover_ctx)
+            .with_hosts(asm_host, moho_host)
+            .with_config(orch_config)
+            .with_input_builder(input_builder)
+            .with_block_subscription(block_subscription)
+            .launch(&executor)
+            .await?;
+
+        Some(rpc_deps)
     } else {
-        (None, None)
+        None
     };
 
     // 7. Spawn block watcher as a critical task.
@@ -177,7 +176,6 @@ pub(crate) async fn bootstrap(
             bitcoin_config,
             bitcoin_client_for_driver,
             asm_worker_for_driver,
-            proof_tx,
             shutdown,
         )
     });
