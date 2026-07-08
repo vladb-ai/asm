@@ -219,13 +219,14 @@ impl ManifestMmrStore for TestAsmWorkerContext {
     fn put_manifest_hash(&self, height: u64, hash: AsmManifestHash) -> WorkerResult<()> {
         let inner = self.inner.lock().unwrap();
         StoredMmr::<Sha256Hasher>::put_leaf(&inner.manifest_mmr, height, *hash.as_ref())
-            .map_err(|_| WorkerError::DbError)?;
+            .map_err(|e| WorkerError::DbError(e.into()))?;
         Ok(())
     }
 
     fn manifest_mmr_leaf_count(&self) -> WorkerResult<u64> {
         let inner = self.inner.lock().unwrap();
-        StoredMmr::<Sha256Hasher>::leaf_count(&inner.manifest_mmr).map_err(|_| WorkerError::DbError)
+        StoredMmr::<Sha256Hasher>::leaf_count(&inner.manifest_mmr)
+            .map_err(|e| WorkerError::DbError(e.into()))
     }
 
     fn generate_mmr_proof_at(
@@ -246,7 +247,7 @@ impl ManifestMmrStore for TestAsmWorkerContext {
     fn get_manifest_hash(&self, index: u64) -> WorkerResult<AsmManifestHash> {
         let inner = self.inner.lock().unwrap();
         StoredMmr::<Sha256Hasher>::get_leaf(&inner.manifest_mmr, index)
-            .map_err(|_| WorkerError::DbError)?
+            .map_err(|e| WorkerError::DbError(e.into()))?
             .map(AsmManifestHash::from)
             .ok_or(WorkerError::ManifestHashNotFound { index })
     }
