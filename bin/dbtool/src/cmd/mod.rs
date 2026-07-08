@@ -2,14 +2,16 @@
 //! `main` emits.
 
 pub(crate) mod aux;
+pub(crate) mod export_entries;
 pub(crate) mod manifest;
 pub(crate) mod manifest_mmr;
+pub(crate) mod moho_state;
 pub(crate) mod state;
 
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::cli::AsmResource;
+use crate::cli::{AsmResource, MohoResource};
 
 /// Dispatches an `asm <resource> <verb>` command against the storage DB.
 pub(crate) fn run_asm(db: &sled::Db, resource: AsmResource, write: bool) -> Result<Value> {
@@ -18,5 +20,33 @@ pub(crate) fn run_asm(db: &sled::Db, resource: AsmResource, write: bool) -> Resu
         AsmResource::Aux { verb } => aux::run(db, verb, write),
         AsmResource::Manifest { verb } => manifest::run(db, verb, write),
         AsmResource::ManifestMmr { verb } => manifest_mmr::run(db, verb, write),
+    }
+}
+
+/// Dispatches a `moho <resource> <verb>` command against the already-opened DB.
+///
+/// The two resources live in different databases (see [`MohoDb`]); `main`
+/// consults [`moho_target`] to pick the opener before calling this.
+pub(crate) fn run_moho(db: &sled::Db, resource: MohoResource, write: bool) -> Result<Value> {
+    match resource {
+        MohoResource::State { verb } => moho_state::run(db, verb, write),
+        MohoResource::ExportEntries { verb } => export_entries::run(db, verb, write),
+    }
+}
+
+/// Which database a `moho` resource targets.
+pub(crate) enum MohoDb {
+    /// `moho state` lives in the proof DB.
+    Proof,
+    /// `moho export-entries` lives in the storage DB.
+    Storage,
+}
+
+/// Reports a `moho` resource's database without consuming it, so `main` can
+/// open the right one before dispatching.
+pub(crate) fn moho_target(resource: &MohoResource) -> MohoDb {
+    match resource {
+        MohoResource::State { .. } => MohoDb::Proof,
+        MohoResource::ExportEntries { .. } => MohoDb::Storage,
     }
 }

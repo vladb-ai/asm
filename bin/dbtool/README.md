@@ -10,11 +10,13 @@ The binary is `dbtool` (crate `asm-dbtool`).
 
 The runner persists into two independent sled databases:
 
-- **Storage DB** — anchor state, aux data, full manifests, and the
-  manifest-hash MMR. Backed by the `asm-storage` crate. Targeted by `asm`
-  commands.
-- **Proof DB** — ASM/Moho proofs, Moho state, and the remote-prover bookkeeping.
-  Backed by `strata-asm-proof-db`. Targeted by the planned `moho`/`proof`
+- **Storage DB** — anchor state, aux data, full manifests, the manifest-hash
+  MMR, and the per-container export-entry MMR. Backed by `asm-storage` and
+  `strata-asm-moho-storage` (`SledExportEntriesDb`). Targeted by `asm` and
+  `moho export-entries` commands.
+- **Proof DB** — Moho state snapshots, ASM/Moho proofs, and the remote-prover
+  bookkeeping. Backed by `strata-asm-moho-storage` (`SledMohoStateDb`) and
+  `strata-asm-prover-storage`. Targeted by `moho state` and the planned `proof`
   commands.
 
 Each invocation opens exactly the one database its command needs, so both are
@@ -66,6 +68,14 @@ dbtool --db ./data/asm --write asm state prune --after 1234
 dbtool --db ./data/asm asm manifest get 1234:6f1a...ee \
   | jq -r .ssz_hex | xxd -r -p > manifest.ssz
 dbtool --db ./data/asm --write asm manifest put --file manifest.ssz
+
+# Moho state (proof DB): highest snapshot and one by commitment
+dbtool --db ./data/proof --pretty moho state latest
+dbtool --db ./data/proof moho state get 1234:6f1a...ee
+
+# Export-entry MMR (storage DB): a container's size, a leaf, and its proof
+dbtool --db ./data/asm moho export-entries count 0
+dbtool --db ./data/asm moho export-entries proof 0 5 --at 100
 ```
 
 ## Command surface
@@ -84,11 +94,27 @@ height-indexed, so the `<index>` read by `leaf`/`proof` and the `<height>`
 written by `put-leaf` are the same value — the leaf for the block at height `h`
 is leaf index `h`.
 
+### `moho` — implemented
+
+The two resources live in different databases, so `--db` points at a different
+directory for each: `moho state` at the proof DB, `moho export-entries` at the
+storage DB.
+
+| Resource | DB | Verbs |
+|---|---|---|
+| `moho state` | proof | `get <commitment>` · `latest` · `list` · `put <commitment> --file F` (w) · `delete <commitment>` (w) · `prune (--before\|--after) <h>` (w) |
+| `moho export-entries` | storage | `get <container> <index>` · `find <container> <hash>` · `height <container> <index>` · `count <container>` · `range <container> <height>` · `proof <container> <index> [--at <n>]` · `append <container> <height> --file F` (w) · `prune --from <height>` (w) |
+
+`moho state put` takes the commitment explicitly — a `MohoState` does not carry
+its own key. `moho export-entries` addresses each leaf by its `mmr_index`
+within a container; `append` reads a file of concatenated raw 32-byte hashes,
+and `prune --from` drops every leaf at or above a height across all containers.
+
 ### Planned (proof DB) — not yet implemented
 
-These share the proof DB and the `strata-asm-proof-db` crate and land in a
+These share the proof DB and the `strata-asm-prover-storage` crate and land in a
 follow-up:
 
-- `asm proof get/list/delete` (ASM step proofs)
-- `moho state` · `moho export-entries[-mmr]` · `moho proof`
+- `proof asm get/list/delete` (ASM step proofs)
+- `proof moho get/list/latest/delete` (Moho recursive proofs)
 - `proof mapping` · `proof status` · `proof prune` (remote-prover bookkeeping)
